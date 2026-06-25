@@ -1,4 +1,4 @@
-<!doctype html>
+ <!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -16,13 +16,13 @@
         </div>
         <div class="document-title">
           <input id="document-name" value="未命名文档" aria-label="文档名称" />
-          <span id="save-state">已自动保存</span>
+          <span id="save-state">未保存</span>
         </div>
         <div class="topbar-actions">
           <input id="file-input" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden />
+          <button class="button primary" id="save-file-button" type="button">保存文件</button>
           <button class="button ghost" id="open-folder-button" type="button">打开文件夹</button>
           <button class="button ghost" id="open-button" type="button">打开文件</button>
-          <button class="button primary" id="download-button" type="button">下载 .md</button>
           <button class="icon-button" id="settings-button" type="button" aria-label="设置">⚙</button>
           <button class="icon-button" id="theme-button" type="button" aria-label="切换主题">☾</button>
         </div>
@@ -43,6 +43,8 @@
           <button type="button" data-action="task" title="任务列表">☑</button>
           <button type="button" data-action="table" title="表格">▦</button>
           <button type="button" data-action="block-code" title="代码块">{ }</button>
+          <span class="divider"></span>
+          <button type="button" data-action="clear-format" title="清除格式">Tx</button>
         </div>
         <div class="mode-switcher">
           <button class="active" type="button" data-mode="visual">所见即所得</button>

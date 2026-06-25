@@ -29,6 +29,7 @@ const wordCount = document.querySelector("#word-count");
 const blockCount = document.querySelector("#block-count");
 const editorState = document.querySelector("#editor-state");
 const themeButton = document.querySelector("#theme-button");
+const saveFileButton = document.querySelector("#save-file-button");
 const openFolderButton = document.querySelector("#open-folder-button");
 const settingsButton = document.querySelector("#settings-button");
 const settingsModal = document.querySelector("#settings-modal");
@@ -94,6 +95,7 @@ const SHORTCUTS = {
   task: "Mod+Alt+X",
   table: "Mod+Alt+T",
   "block-code": "Mod+Alt+C",
+  "clear-format": "Mod+Alt+Backspace",
 };
 
 const MODE_SHORTCUTS = {
@@ -152,6 +154,30 @@ function getTextStats(text) {
   const normalized = text.replace(/[#>*_~`|[\]()!-]/g, " ");
   return (normalized.match(/[\u3400-\u9fff]/g)?.length ?? 0)
     + (normalized.match(/[a-zA-Z0-9]+(?:['-][a-zA-Z0-9]+)*/g)?.length ?? 0);
+}
+
+function currentWindowTitle() {
+  if (currentFilePath) return currentFilePath.split(/[\\/]/).at(-1);
+  return `${documentName.value.trim() || "未命名文档"}.md`;
+}
+
+function setNativeWindowTitle(title) {
+  document.title = title;
+  if (!runningInTauri()) return;
+  invokeDesktop("set_window_title", { title }).catch(console.error);
+}
+
+function updateDocumentTitle() {
+  setNativeWindowTitle(currentWindowTitle());
+}
+
+function sanitizeFileName(name) {
+  return name.trim().replace(/[<>:"/\\|?*]+/g, "-").replace(/^\.+$/, "").trim();
+}
+
+function parentDirectoryFromPath(path) {
+  const separatorIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return separatorIndex > 0 ? path.slice(0, separatorIndex) : "";
 }
 
 function normalizeLanguage(language = "") {
@@ -486,7 +512,7 @@ const editor = new Editor({
       markedOptions: { gfm: true },
     }),
   ],
-  content: starterDocument,
+  content: "",
   contentType: "markdown",
   editorProps: {
     attributes: {
@@ -500,7 +526,7 @@ const editor = new Editor({
     sourceEditor.value = markdown;
     updateStats();
     updateOutline();
-    scheduleSave();
+    markDocumentChanged();
   },
   onSelectionUpdate: updateToolbarState,
 });
@@ -530,6 +556,7 @@ function updateToolbarState() {
     task: editor.isActive("taskList"),
     table: editor.isActive("table"),
     "block-code": editor.isActive("codeBlock"),
+    "clear-format": false,
   };
   document.querySelectorAll(".format-tools button[data-action]").forEach((button) => {
     button.classList.toggle("active", Boolean(active[button.dataset.action]));
@@ -625,6 +652,28 @@ function jumpToOutlineItem(button) {
   }
 }
 
+function toggleSingleCodeBlock() {
+  const { state, view } = editor;
+  const { from, to, empty } = state.selection;
+  if (empty || editor.isActive("codeBlock")) {
+    return editor.commands.toggleCodeBlock();
+  }
+
+  const selectedText = state.doc.textBetween(from, to, "\n");
+  const codeBlock = state.schema.nodes.codeBlock.create(
+    null,
+    selectedText ? state.schema.text(selectedText) : null,
+  );
+  const transaction = state.tr.replaceRangeWith(from, to, codeBlock).scrollIntoView();
+  view.dispatch(transaction);
+  view.focus();
+  return true;
+}
+
+function clearFormatting() {
+  editor.chain().focus().unsetAllMarks().clearNodes().run();
+}
+
 const actions = {
   heading: () => editor.commands.toggleHeading({ level: 2 }),
   bold: () => editor.commands.toggleBold(),
@@ -643,7 +692,8 @@ const actions = {
   number: () => editor.commands.toggleOrderedList(),
   task: () => editor.commands.toggleTaskList(),
   table: () => editor.commands.insertTable({ rows: 3, cols: 3, withHeaderRow: true }),
-  "block-code": () => editor.commands.toggleCodeBlock(),
+  "block-code": toggleSingleCodeBlock,
+  "clear-format": clearFormatting,
 };
 
 function platformShortcut(shortcut) {
@@ -785,6 +835,11 @@ document.querySelector(".mode-switcher").addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (shortcutMatches(event, "Mod+S")) {
+    event.preventDefault();
+    saveCurrentDocument();
+    return;
+  }
   handleAppShortcut(event);
 });
 addShortcutTitles();
@@ -793,7 +848,7 @@ sourceEditor.addEventListener("input", () => {
   markdown = sourceEditor.value;
   wordCount.textContent = `${getTextStats(markdown)} 字`;
   updateOutline();
-  scheduleSave();
+  markDocumentChanged();
 });
 
 sourceEditor.addEventListener("keydown", (event) => {
@@ -895,7 +950,6 @@ async function openDesktopFolderPath(path) {
 
 async function openDroppedPaths(paths) {
   if (!runningInTauri() || !paths?.length) return;
-  await saveCurrentDocument();
 
   for (const path of paths) {
     try {
@@ -932,18 +986,72 @@ async function setupNativeDragDrop() {
     } else if (payload?.type === "drop") {
       openDroppedPaths(payload.paths);
     } else if (payload?.type === "leave" || payload?.type === "cancel") {
-      saveState.textContent = currentFilePath ? "已写入文件" : "已自动保存";
+      saveState.textContent = currentFilePath ? "已写入文件" : "未保存";
     }
   });
 }
 
+async function bindUnsavedDocumentToPath() {
+  const defaultName = `${sanitizeFileName(documentName.value || "未命名文档") || "未命名文档"}.md`;
+
+  if (runningInTauri()) {
+    const path = await invokeDesktop("choose_new_file_path", { defaultName });
+    if (!path) return false;
+    currentFileHandle = null;
+    currentFilePath = path;
+    localStorage.setItem(LAST_FILE_KEY, path);
+    const parentPath = parentDirectoryFromPath(path);
+    if (parentPath) {
+      desktopFolderPath = parentPath;
+      localStorage.setItem(LAST_FOLDER_KEY, parentPath);
+      folderHandle = null;
+      folderName.textContent = parentPath.split(/[\\/]/).at(-1);
+    }
+    documentName.readOnly = true;
+    documentName.title = path;
+    documentName.value = fileDisplayName(path.split(/[\\/]/).at(-1));
+    updateDocumentTitle();
+    return true;
+  }
+
+  if (typeof globalThis.showSaveFilePicker !== "function") return false;
+  const handle = await globalThis.showSaveFilePicker({
+    suggestedName: defaultName,
+    types: [{
+      description: "Markdown",
+      accept: { "text/markdown": [".md", ".markdown", ".txt"] },
+    }],
+  });
+  currentFileHandle = handle;
+  currentFilePath = "";
+  localStorage.removeItem(LAST_FILE_KEY);
+  documentName.readOnly = true;
+  documentName.title = handle.name;
+  documentName.value = fileDisplayName(handle.name);
+  setActiveTreeFile();
+  updateDocumentTitle();
+  return true;
+}
+
 async function saveCurrentDocument() {
   clearTimeout(saveTimer);
+  saveState.textContent = "正在保存…";
   if (!editorSurface.classList.contains("source-mode")) markdown = editor.getMarkdown();
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ name: documentName.value.trim() || "未命名文档", content: markdown }));
   if (!currentFileHandle && !currentFilePath) {
-    saveState.textContent = "已自动保存";
-    return;
+    try {
+      const bound = await bindUnsavedDocumentToPath();
+      if (!bound) {
+        saveState.textContent = "已取消保存";
+        return;
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        saveState.textContent = `保存路径选择失败：${error.message || error}`;
+        console.error(error);
+      }
+      return;
+    }
   }
   try {
     if (runningInTauri()) {
@@ -953,6 +1061,7 @@ async function saveCurrentDocument() {
       await writable.write(markdown);
       await writable.close();
     }
+    setActiveTreeFile();
     saveState.textContent = "已写入文件";
   } catch (error) {
     saveState.textContent = "文件写入失败";
@@ -960,15 +1069,13 @@ async function saveCurrentDocument() {
   }
 }
 
-function scheduleSave() {
-  saveState.textContent = "正在保存…";
+function markDocumentChanged() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveCurrentDocument, 350);
+  saveState.textContent = "未保存";
 }
 
 async function openTreeFile(path) {
   if (path === currentFilePath) return;
-  await saveCurrentDocument();
   try {
     let content;
     let fileName;
@@ -991,6 +1098,7 @@ async function openTreeFile(path) {
     documentName.title = path;
     setMarkdown(content);
     setActiveTreeFile();
+    updateDocumentTitle();
     saveState.textContent = "已打开";
   } catch (error) {
     saveState.textContent = "文件打开失败";
@@ -1003,7 +1111,6 @@ async function openSingleFile() {
     fileInput.click();
     return;
   }
-  await saveCurrentDocument();
   const path = await invokeDesktop("choose_file");
   if (!path) return;
   await openTreeFile(path);
@@ -1015,7 +1122,6 @@ async function openFolder() {
     return;
   }
   try {
-    await saveCurrentDocument();
     if (runningInTauri()) {
       const selectedPath = await invokeDesktop("choose_folder");
       if (!selectedPath) return;
@@ -1040,7 +1146,11 @@ async function openFolder() {
   }
 }
 
-documentName.addEventListener("input", scheduleSave);
+documentName.addEventListener("input", () => {
+  updateDocumentTitle();
+  markDocumentChanged();
+});
+saveFileButton.addEventListener("click", saveCurrentDocument);
 openFolderButton.addEventListener("click", openFolder);
 settingsButton.addEventListener("click", openSettings);
 settingsCloseButton.addEventListener("click", closeSettings);
@@ -1074,7 +1184,6 @@ document.querySelector("#open-button").addEventListener("click", openSingleFile)
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   if (!file) return;
-  await saveCurrentDocument();
   currentFileHandle = null;
   currentFilePath = "";
   documentName.readOnly = false;
@@ -1082,18 +1191,9 @@ fileInput.addEventListener("change", async () => {
   documentName.value = fileDisplayName(file.name);
   setMarkdown(await file.text());
   setActiveTreeFile();
-  scheduleSave();
+  updateDocumentTitle();
+  saveState.textContent = "未保存";
   fileInput.value = "";
-});
-
-document.querySelector("#download-button").addEventListener("click", async () => {
-  await saveCurrentDocument();
-  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = `${(documentName.value.trim() || "未命名文档").replace(/[<>:"/\\|?*]/g, "-")}.md`;
-  link.click();
-  URL.revokeObjectURL(link.href);
 });
 
 function applyTheme(theme) {
@@ -1115,6 +1215,7 @@ async function bootstrap() {
     documentName.value = savedDocument?.name || "欢迎使用墨笺";
     setMarkdown(savedDocument?.content || starterDocument);
     await openDroppedPaths(startupPaths);
+    updateDocumentTitle();
     applyTheme(localStorage.getItem(THEME_KEY) || "light");
     setupNativeDragDrop();
     return;
@@ -1134,6 +1235,8 @@ async function bootstrap() {
     documentName.value = savedDocument?.name || "欢迎使用墨笺";
     setMarkdown(savedDocument?.content || starterDocument);
   }
+
+  updateDocumentTitle();
 
   if (!runningInTauri() && typeof globalThis.showDirectoryPicker !== "function") {
     openFolderButton.title = "请通过 localhost 或 HTTPS 使用支持 File System Access API 的 Chromium 浏览器";

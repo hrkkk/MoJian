@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tauri::WebviewWindow;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +89,26 @@ fn list_directory(path: String) -> Result<Vec<TreeEntry>, String> {
 }
 
 #[tauri::command]
+fn set_window_title(window: WebviewWindow, title: String) -> Result<(), String> {
+    window.set_title(&title).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn choose_new_file_path(default_name: String) -> Option<String> {
+    let final_name = if is_editable(Path::new(&default_name)) {
+        default_name
+    } else {
+        format!("{default_name}.md")
+    };
+
+    rfd::FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown", "txt"])
+        .set_file_name(&final_name)
+        .save_file()
+        .map(path_string)
+}
+
+#[tauri::command]
 fn path_kind(path: String) -> Result<String, String> {
     let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
     if metadata.is_dir() {
@@ -126,6 +147,8 @@ pub fn run() {
             choose_folder,
             choose_file,
             list_directory,
+            set_window_title,
+            choose_new_file_path,
             path_kind,
             startup_paths,
             read_text_file,
