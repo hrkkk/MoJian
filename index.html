@@ -20,6 +20,7 @@
         </div>
         <div class="topbar-actions">
           <input id="file-input" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden />
+          <button class="button primary" id="new-file-button" type="button">新建文件</button>
           <button class="button primary" id="save-file-button" type="button">保存文件</button>
           <button class="button ghost" id="open-folder-button" type="button">打开文件夹</button>
           <button class="button ghost" id="open-button" type="button">打开文件</button>
@@ -106,6 +107,14 @@
         </div>
 
         <div class="settings-section">
+          <h3>保存</h3>
+          <label class="checkbox-row">
+            <input id="auto-save-setting" type="checkbox" />
+            <span>自动保存</span>
+          </label>
+        </div>
+
+        <div class="settings-section">
           <h3>编辑器字体</h3>
           <label class="field-row">
             <span>字体</span>
@@ -126,6 +135,18 @@
         <footer class="settings-panel-footer">
           <button class="button ghost" id="settings-reset-button" type="button">恢复默认</button>
           <button class="button primary" id="settings-save-button" type="button">保存</button>
+        </footer>
+      </section>
+    </div>
+    <div class="confirm-modal" id="unsaved-modal" aria-hidden="true">
+      <div class="confirm-backdrop"></div>
+      <section class="confirm-panel" role="dialog" aria-modal="true" aria-labelledby="unsaved-title">
+        <h2 id="unsaved-title">保存更改？</h2>
+        <p>当前文件有未保存的修改，关闭前要保存吗？</p>
+        <footer class="confirm-actions">
+          <button class="button primary" type="button" data-unsaved-action="save">保存</button>
+          <button class="button ghost" type="button" data-unsaved-action="discard">不保存</button>
+          <button class="button ghost" type="button" data-unsaved-action="cancel">取消</button>
         </footer>
       </section>
     </div>
