@@ -84,15 +84,17 @@ button { color: inherit; }
 
 .workspace {
   display: grid;
-  grid-template-columns: var(--sidebar-width, 230px) 6px minmax(0, 1fr);
+  grid-template-columns: var(--outline-width, 230px) 6px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
   background: var(--bg);
 }
 .workspace.sidebar-collapsed {
-  grid-template-columns: 0 minmax(0, 1fr);
+  grid-template-columns: 0 0 minmax(0, 1fr);
 }
 .explorer {
+  grid-column: 1;
   min-width: 0;
   overflow: auto;
   border-right: 1px solid var(--border);
@@ -105,6 +107,7 @@ button { color: inherit; }
   pointer-events: none;
 }
 .sidebar-resizer {
+  grid-column: 2;
   position: relative;
   z-index: 2;
   cursor: col-resize;
@@ -121,7 +124,11 @@ button { color: inherit; }
 .workspace.resizing-sidebar .sidebar-resizer::after {
   background: var(--accent-soft);
 }
-.workspace.sidebar-collapsed .sidebar-resizer { display: none; }
+.workspace.sidebar-collapsed .sidebar-resizer {
+  visibility: hidden;
+  pointer-events: none;
+  border: 0;
+}
 .mode-switcher .sidebar-toggle-button {
   width: 30px;
   min-width: 30px;
@@ -308,7 +315,7 @@ button { color: inherit; }
   color: var(--muted);
   font-size: 12px;
 }
-.editor-pane { min-width: 0; overflow: auto; background: var(--paper); }
+.editor-pane { grid-column: 3; min-width: 0; overflow: auto; background: var(--paper); }
 .editor-surface {
   position: relative;
   width: 100%;
@@ -425,6 +432,23 @@ html[data-theme="dark"] .syntax-variable { color: #ffa657; }
   max-width: 100%;
   margin: 1.2em 0;
   line-height: 0;
+}
+.markdown-syntax-marker {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: .82em;
+  font-weight: 400;
+  opacity: .8;
+  cursor: text;
+  outline: none;
+  pointer-events: auto;
+  user-select: text;
+  white-space: pre;
+}
+.markdown-syntax-marker:focus {
+  border-radius: 3px;
+  background: var(--accent-soft);
+  opacity: 1;
 }
 .image-resize-wrapper img {
   display: block;
@@ -592,6 +616,7 @@ html[data-theme="dark"] .syntax-variable { color: #ffa657; }
   .workspace { grid-template-columns: 1fr; }
   .explorer { display: none; }
   .sidebar-resizer { display: none; }
+  .editor-pane { grid-column: 1; }
   .editor-surface { width: 100%; min-height: 100%; margin: 0; border: 0; }
   .markdown-body { --page-padding: 28px; padding: 46px var(--page-padding) 80px; }
   #source-editor { padding: 46px 28px 80px; }

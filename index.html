@@ -22,7 +22,6 @@
           <input id="file-input" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden />
           <button class="button primary" id="new-file-button" type="button">新建文件</button>
           <button class="button primary" id="save-file-button" type="button">保存文件</button>
-          <button class="button ghost" id="open-folder-button" type="button">打开文件夹</button>
           <button class="button ghost" id="open-button" type="button">打开文件</button>
           <button class="icon-button" id="settings-button" type="button" aria-label="设置">⚙</button>
           <button class="icon-button" id="theme-button" type="button" aria-label="切换主题">☾</button>
@@ -48,22 +47,21 @@
           <button type="button" data-action="clear-format" title="清除格式">Tx</button>
         </div>
         <div class="mode-switcher">
+          <button class="sidebar-toggle-button active" id="outline-toggle-button" type="button" aria-label="显示或隐藏文件大纲" aria-pressed="true" title="显示或隐藏文件大纲">☰</button>
           <button class="active" type="button" data-mode="visual">所见即所得</button>
           <button type="button" data-mode="source">源码</button>
         </div>
       </nav>
 
       <main class="workspace">
-        <aside class="explorer" id="explorer">
+        <aside class="explorer" id="outline-sidebar" aria-label="文件大纲">
           <div class="explorer-header">
-            <span>资源管理器</span>
-            <button id="refresh-tree-button" type="button" aria-label="刷新文件树" title="刷新文件树">↻</button>
+            <span>文件大纲</span>
+            <button id="outline-collapse-button" type="button" aria-label="全部折叠" title="全部折叠">⊟</button>
           </div>
-          <div class="folder-name" id="folder-name">尚未打开文件夹</div>
-          <div class="file-tree" id="file-tree">
-            <button class="empty-tree-action" id="empty-tree-action" type="button">打开一个文件夹</button>
-          </div>
+          <div class="outline-tree" id="outline-tree"></div>
         </aside>
+        <div class="sidebar-resizer" id="outline-resizer" role="separator" aria-label="调整文件大纲宽度" aria-orientation="vertical"></div>
         <section class="editor-pane">
           <section class="editor-surface">
             <div id="visual-editor" class="markdown-body" aria-label="所见即所得 Markdown 编辑器"></div>
@@ -92,10 +90,6 @@
         <div class="settings-section">
           <h3>启动应用后</h3>
           <label class="radio-row">
-            <input type="radio" name="startup-behavior" value="last-folder" />
-            <span>打开上次打开的文件夹</span>
-          </label>
-          <label class="radio-row">
             <input type="radio" name="startup-behavior" value="last-file" />
             <span>打开上次打开的文件</span>
           </label>
@@ -103,7 +97,7 @@
             <input type="radio" name="startup-behavior" value="new-file" />
             <span>打开新文件</span>
           </label>
-          <p class="settings-note">自动恢复文件夹或文件需要桌面端权限；网页端会回退到本地缓存或新文件。</p>
+          <p class="settings-note">自动恢复文件需要桌面端权限；网页端会回退到本地缓存或新文件。</p>
         </div>
 
         <div class="settings-section">

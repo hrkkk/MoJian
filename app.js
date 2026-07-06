@@ -7,16 +7,12 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { Plugin } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { DOMSerializer } from "@tiptap/pm/model";
 
 const STORAGE_KEY = "mojian-markdown-document";
 const THEME_KEY = "mojian-theme";
 const SETTINGS_KEY = "mojian-settings";
-const LAST_FOLDER_KEY = "mojian-last-folder";
 const LAST_FILE_KEY = "mojian-last-file";
-const SIDEBAR_WIDTH_KEY = "mojian-sidebar-width";
-const SIDEBAR_OPEN_KEY = "mojian-sidebar-open";
-const MIN_SIDEBAR_WIDTH = 180;
-const MAX_SIDEBAR_WIDTH = 520;
 
 const DEFAULT_SETTINGS = {
   startupBehavior: "last-file",
@@ -36,7 +32,6 @@ const editorState = document.querySelector("#editor-state");
 const themeButton = document.querySelector("#theme-button");
 const newFileButton = document.querySelector("#new-file-button");
 const saveFileButton = document.querySelector("#save-file-button");
-const openFolderButton = document.querySelector("#open-folder-button");
 const settingsButton = document.querySelector("#settings-button");
 const settingsModal = document.querySelector("#settings-modal");
 const settingsCloseButton = document.querySelector("#settings-close-button");
@@ -46,14 +41,12 @@ const autoSaveSetting = document.querySelector("#auto-save-setting");
 const fontFamilySetting = document.querySelector("#font-family-setting");
 const fontSizeSetting = document.querySelector("#font-size-setting");
 const unsavedModal = document.querySelector("#unsaved-modal");
-const refreshTreeButton = document.querySelector("#refresh-tree-button");
-const emptyTreeAction = document.querySelector("#empty-tree-action");
-const folderName = document.querySelector("#folder-name");
-const fileTree = document.querySelector("#file-tree");
 const workspace = document.querySelector(".workspace");
+const outlineToggleButton = document.querySelector("#outline-toggle-button");
+const outlineCollapseButton = document.querySelector("#outline-collapse-button");
+const outlineResizer = document.querySelector("#outline-resizer");
 const editorPane = document.querySelector(".editor-pane");
-const explorer = document.querySelector("#explorer");
-let outlineTree = null;
+const outlineTree = document.querySelector("#outline-tree");
 const collapsedOutlineItems = new Set();
 let fileTreeRefreshToken = 0;
 
@@ -150,11 +143,8 @@ let isSaving = false;
 let allowCloseWithoutPrompt = false;
 let lastSyncedDirtyState = null;
 let applyingContent = false;
-let folderHandle = null;
-let desktopFolderPath = "";
 let currentFileHandle = null;
 let currentFilePath = "";
-const fileHandles = new Map();
 let settings = loadSettings();
 let sharedScrollTop = 0;
 
@@ -181,7 +171,7 @@ function syncDirtyState(dirty) {
   });
 }
 
-function markDocumentSaved(message = "Saved") {
+function markDocumentSaved(message = "已保存") {
   clearTimeout(saveTimer);
   isDirty = false;
   lastSavedMarkdown = markdown;
@@ -410,136 +400,6 @@ function closeSettings() {
   settingsModal.setAttribute("aria-hidden", "true");
 }
 
-function clampSidebarWidth(width) {
-  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
-}
-
-function applySidebarState(open = localStorage.getItem(SIDEBAR_OPEN_KEY) !== "false") {
-  workspace.classList.toggle("sidebar-collapsed", !open);
-  const toggleButton = document.querySelector("#sidebar-toggle-button");
-  if (toggleButton) {
-    toggleButton.classList.toggle("active", open);
-    toggleButton.setAttribute("aria-pressed", String(open));
-  }
-}
-
-function setSidebarWidth(width) {
-  const safeWidth = clampSidebarWidth(width);
-  workspace.style.setProperty("--sidebar-width", `${safeWidth}px`);
-  localStorage.setItem(SIDEBAR_WIDTH_KEY, String(safeWidth));
-}
-
-function setupSidebarControls() {
-  const modeSwitcher = document.querySelector(".mode-switcher");
-  const toggleButton = document.createElement("button");
-  const resizer = document.createElement("div");
-  const savedWidth = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
-
-  toggleButton.id = "sidebar-toggle-button";
-  toggleButton.type = "button";
-  toggleButton.className = "sidebar-toggle-button";
-  toggleButton.textContent = "☰";
-  toggleButton.setAttribute("aria-label", "Show or hide Files/Outline");
-  toggleButton.title = "Show or hide Files/Outline";
-  toggleButton.setAttribute("aria-pressed", "true");
-  modeSwitcher.insertBefore(toggleButton, modeSwitcher.firstChild);
-
-  resizer.className = "sidebar-resizer";
-  resizer.setAttribute("role", "separator");
-  resizer.setAttribute("aria-orientation", "vertical");
-  resizer.title = "Drag to resize Files/Outline";
-  explorer.after(resizer);
-
-  if (Number.isFinite(savedWidth)) setSidebarWidth(savedWidth);
-  applySidebarState();
-
-  toggleButton.addEventListener("click", () => {
-    const nextOpen = workspace.classList.contains("sidebar-collapsed");
-    localStorage.setItem(SIDEBAR_OPEN_KEY, String(nextOpen));
-    applySidebarState(nextOpen);
-    if (!nextOpen) {
-      requestAnimationFrame(() => {
-        if (editorSurface.classList.contains("source-mode")) sourceEditor.focus({ preventScroll: true });
-        else editor.view.dom.focus({ preventScroll: true });
-      });
-    }
-  });
-
-  resizer.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    localStorage.setItem(SIDEBAR_OPEN_KEY, "true");
-    applySidebarState(true);
-    workspace.classList.add("resizing-sidebar");
-    resizer.setPointerCapture(event.pointerId);
-
-    const rect = workspace.getBoundingClientRect();
-    const handlePointerMove = (moveEvent) => {
-      setSidebarWidth(moveEvent.clientX - rect.left);
-    };
-    const handlePointerUp = () => {
-      workspace.classList.remove("resizing-sidebar");
-      resizer.removeEventListener("pointermove", handlePointerMove);
-      resizer.removeEventListener("pointerup", handlePointerUp);
-      resizer.removeEventListener("pointercancel", handlePointerUp);
-    };
-
-    resizer.addEventListener("pointermove", handlePointerMove);
-    resizer.addEventListener("pointerup", handlePointerUp);
-    resizer.addEventListener("pointercancel", handlePointerUp);
-  });
-}
-
-function setupSidebarViews() {
-  const existingChildren = [...explorer.children];
-  const tabs = document.createElement("div");
-  const filesTab = document.createElement("button");
-  const outlineTab = document.createElement("button");
-  const filesPanel = document.createElement("div");
-  const outlinePanel = document.createElement("div");
-  const outlineHeader = document.createElement("div");
-  const outlineTitle = document.createElement("span");
-
-  tabs.className = "sidebar-tabs";
-  filesTab.type = "button";
-  filesTab.className = "active";
-  filesTab.dataset.sidebarView = "files";
-  filesTab.textContent = "Files";
-  outlineTab.type = "button";
-  outlineTab.dataset.sidebarView = "outline";
-  outlineTab.textContent = "Outline";
-
-  filesPanel.className = "sidebar-panel active";
-  filesPanel.dataset.sidebarPanel = "files";
-  outlinePanel.className = "sidebar-panel";
-  outlinePanel.dataset.sidebarPanel = "outline";
-  outlinePanel.hidden = true;
-
-  outlineHeader.className = "explorer-header";
-  outlineTitle.textContent = "Outline";
-  outlineTree = document.createElement("div");
-  outlineTree.className = "outline-tree";
-  outlineTree.id = "outline-tree";
-
-  tabs.append(filesTab, outlineTab);
-  filesPanel.append(...existingChildren);
-  outlineHeader.append(outlineTitle);
-  outlinePanel.append(outlineHeader, outlineTree);
-  explorer.append(tabs, filesPanel, outlinePanel);
-
-  tabs.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-sidebar-view]");
-    if (!button) return;
-    const view = button.dataset.sidebarView;
-    tabs.querySelectorAll("button").forEach((item) => item.classList.toggle("active", item === button));
-    explorer.querySelectorAll(".sidebar-panel").forEach((panel) => {
-      const active = panel.dataset.sidebarPanel === view;
-      panel.classList.toggle("active", active);
-      panel.hidden = !active;
-    });
-  });
-}
-
 function updateStats() {
   wordCount.textContent = `${getTextStats(markdown)} 字`;
   blockCount.textContent = `${editor.state.doc.childCount} 个段落`;
@@ -632,6 +492,152 @@ const SyntaxHighlight = Extension.create({
                 );
               }
             });
+            return DecorationSet.create(state.doc, decorations);
+          },
+        },
+      }),
+    ];
+  },
+});
+
+function markdownMarker(text, onCommit, label = "Markdown syntax") {
+  const marker = document.createElement("span");
+  marker.className = "markdown-syntax-marker";
+  marker.textContent = text;
+  marker.setAttribute("role", "textbox");
+  marker.setAttribute("aria-label", label);
+  marker.contentEditable = "plaintext-only";
+  marker.spellcheck = false;
+
+  let canceled = false;
+  marker.addEventListener("mousedown", (event) => event.stopPropagation());
+  marker.addEventListener("click", (event) => event.stopPropagation());
+  marker.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") {
+      event.preventDefault();
+      marker.blur();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      canceled = true;
+      marker.textContent = text;
+      marker.blur();
+    }
+  });
+  marker.addEventListener("blur", () => {
+    if (!canceled && marker.textContent !== text) onCommit?.(marker.textContent || "");
+  }, { once: true });
+  return marker;
+}
+
+function updateInlineMarkdownMarker(range, value) {
+  const markerTypes = { "**": "bold", "__": "bold", "*": "italic", "_": "italic", "~~": "strike", "`": "code" };
+  const nextMarker = value.trim();
+  const transaction = editor.state.tr.removeMark(range.from, range.to, editor.schema.marks[range.type]);
+
+  if (range.type === "link") {
+    const link = /^\]\((\S+?)(?:\s+["'](.*)["'])?\)$/.exec(nextMarker);
+    if (link) transaction.addMark(range.from, range.to, editor.schema.marks.link.create({ href: link[1], title: link[2] || null }));
+  } else {
+    const nextType = markerTypes[nextMarker];
+    if (nextType && editor.schema.marks[nextType]) {
+      transaction.addMark(range.from, range.to, editor.schema.marks[nextType].create());
+    }
+  }
+  editor.view.dispatch(transaction);
+  editor.view.focus();
+}
+
+const ActiveMarkdownSyntax = Extension.create({
+  name: "activeMarkdownSyntax",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          decorations(state) {
+            const { $from } = state.selection;
+            if (!$from.parent.isTextblock) return DecorationSet.empty;
+
+            const block = $from.parent;
+            const blockStart = $from.start();
+            const selectionFrom = state.selection.from;
+            const selectionTo = state.selection.to;
+            const selectionEmpty = state.selection.empty;
+            const decorations = [];
+            const markerPairs = {
+              bold: ["**", "**"],
+              italic: ["*", "*"],
+              strike: ["~~", "~~"],
+              code: ["`", "`"],
+            };
+
+            if (block.type.name === "heading") {
+              decorations.push(
+                Decoration.widget(blockStart, () => markdownMarker(`${"#".repeat(block.attrs.level || 1)} `, (value) => {
+                  const hashes = /^\s*(#{1,6})\s*$/.exec(value);
+                  const position = blockStart - 1;
+                  const transaction = hashes
+                    ? editor.state.tr.setNodeMarkup(position, editor.schema.nodes.heading, { level: hashes[1].length })
+                    : editor.state.tr.setNodeMarkup(position, editor.schema.nodes.paragraph);
+                  editor.view.dispatch(transaction);
+                  editor.view.focus();
+                }, "Heading Markdown marker"), {
+                  side: -1,
+                  key: "active-heading-marker",
+                }),
+              );
+            }
+
+            for (let depth = $from.depth - 1; depth >= 0; depth -= 1) {
+              const ancestor = $from.node(depth);
+              if (ancestor.type.name === "blockquote") {
+                decorations.push(Decoration.widget(blockStart, () => markdownMarker("> ", (value) => {
+                  if (value.trim() !== ">") editor.chain().focus().toggleBlockquote().run();
+                }, "Blockquote Markdown marker"), {
+                  side: -1,
+                  key: "active-blockquote-marker",
+                }));
+                break;
+              }
+            }
+
+            const ranges = [];
+            block.descendants((node, offset) => {
+              if (!node.isText) return;
+              for (const mark of node.marks) {
+                const pair = mark.type.name === "link"
+                  ? ["[", `](${mark.attrs.href || ""}${mark.attrs.title ? ` \"${mark.attrs.title}\"` : ""})`]
+                  : markerPairs[mark.type.name];
+                if (!pair) continue;
+                const from = blockStart + offset;
+                const to = from + node.nodeSize;
+                const signature = `${mark.type.name}:${JSON.stringify(mark.attrs || {})}`;
+                const existing = ranges.findLast((range) => range.signature === signature && range.to === from);
+                if (existing) existing.to = to;
+                else ranges.push({ type: mark.type.name, signature, from, to, pair });
+              }
+            });
+
+            const activeRanges = ranges.filter((range) => {
+              if (!selectionEmpty) return selectionFrom < range.to && selectionTo > range.from;
+              if (selectionFrom < range.from || selectionFrom > range.to) return false;
+              return $from.marks().some((mark) => {
+                const signature = `${mark.type.name}:${JSON.stringify(mark.attrs || {})}`;
+                return signature === range.signature;
+              });
+            });
+
+            for (const range of activeRanges) {
+              const key = `${range.type}:${range.from}:${range.to}`;
+              decorations.push(
+                Decoration.widget(range.from, () => markdownMarker(range.pair[0], (value) => {
+                  if (range.type === "link" && value.trim() === "[") return;
+                  updateInlineMarkdownMarker(range, value);
+                }, `${range.type} opening Markdown marker`), { side: -1, key: `${key}:open`, stopEvent: () => true }),
+                Decoration.widget(range.to, () => markdownMarker(range.pair[1], (value) => updateInlineMarkdownMarker(range, value), `${range.type} closing Markdown marker`), { side: 1, key: `${key}:close`, stopEvent: () => true }),
+              );
+            }
+
             return DecorationSet.create(state.doc, decorations);
           },
         },
@@ -818,6 +824,93 @@ const AppShortcuts = Extension.create({
   },
 });
 
+const ListEnterWithoutMarks = Extension.create({
+  name: "listEnterWithoutMarks",
+  priority: 1000,
+  addKeyboardShortcuts() {
+    return {
+      Enter: () => {
+        const itemType = this.editor.isActive("taskItem") ? "taskItem" : "listItem";
+        if (!this.editor.isActive(itemType)) return false;
+        if (!this.editor.commands.splitListItem(itemType)) return false;
+
+        this.editor.view.dispatch(this.editor.state.tr.setStoredMarks([]));
+        return true;
+      },
+    };
+  },
+});
+
+function containsListNode(fragment) {
+  let found = false;
+  fragment.descendants((node) => {
+    if (["orderedList", "bulletList", "taskList"].includes(node.type.name)) found = true;
+    return !found;
+  });
+  return found;
+}
+
+function blockText(node) {
+  return node.textBetween(0, node.content.size, "\n", "\n").trim();
+}
+
+function serializeListText(list, depth = 0) {
+  const lines = [];
+  const indent = "  ".repeat(depth);
+  let number = Number(list.attrs.start) || 1;
+
+  list.forEach((item) => {
+    const nestedLists = [];
+    const contentLines = [];
+    item.forEach((child) => {
+      if (["orderedList", "bulletList", "taskList"].includes(child.type.name)) nestedLists.push(child);
+      else {
+        const text = blockText(child);
+        if (text) contentLines.push(...text.split("\n"));
+      }
+    });
+
+    let marker;
+    if (list.type.name === "orderedList") marker = `${number++}.`;
+    else if (list.type.name === "taskList") marker = item.attrs.checked ? "- [x]" : "- [ ]";
+    else marker = "-";
+
+    lines.push(`${indent}${marker}${contentLines.length ? ` ${contentLines[0]}` : ""}`);
+    for (const continuation of contentLines.slice(1)) {
+      lines.push(`${indent}  ${continuation}`);
+    }
+    for (const nested of nestedLists) lines.push(serializeListText(nested, depth + 1));
+  });
+  return lines.join("\n");
+}
+
+function serializeClipboardText(fragment) {
+  const parts = [];
+  fragment.forEach((node) => {
+    if (["orderedList", "bulletList", "taskList"].includes(node.type.name)) parts.push(serializeListText(node));
+    else {
+      const text = blockText(node);
+      if (text) parts.push(text);
+    }
+  });
+  return parts.join("\n");
+}
+
+function copyListSelection(view, event) {
+  const slice = view.state.selection.content();
+  if (!event.clipboardData || !containsListNode(slice.content)) return false;
+
+  const container = document.createElement("div");
+  container.append(DOMSerializer.fromSchema(view.state.schema).serializeFragment(slice.content));
+  container.querySelectorAll("li > p").forEach((paragraph) => paragraph.replaceWith(...paragraph.childNodes));
+
+  event.clipboardData.clearData();
+  event.clipboardData.setData("text/plain", serializeClipboardText(slice.content));
+  event.clipboardData.setData("text/html", container.innerHTML);
+  event.preventDefault();
+  return true;
+}
+
 const editor = new Editor({
   element: document.querySelector("#visual-editor"),
   extensions: [
@@ -826,6 +919,8 @@ const editor = new Editor({
       codeBlock: false,
     }),
     AppShortcuts,
+    ListEnterWithoutMarks,
+    ActiveMarkdownSyntax,
     SyntaxHighlight,
     ImageNode,
     CodeBlockWithLanguage,
@@ -844,6 +939,9 @@ const editor = new Editor({
     attributes: {
       class: "tiptap-editor",
       spellcheck: "false",
+    },
+    handleDOMEvents: {
+      copy: copyListSelection,
     },
   },
   onUpdate: ({ editor: currentEditor }) => {
@@ -1001,12 +1099,19 @@ function updateOutline() {
   const sourceHeadings = getSourceHeadings(sourceMode ? sourceEditor.value : markdown);
   const headings = sourceMode ? sourceHeadings : (visualHeadings.length ? visualHeadings : sourceHeadings);
   const rows = getOutlineRows(headings, sourceHeadings);
+  const expandableRows = rows.filter((row) => row.hasChildren);
+  const allCollapsed = expandableRows.length > 0 && expandableRows.every((row) => collapsedOutlineItems.has(row.key));
+
+  outlineCollapseButton.textContent = allCollapsed ? "⊞" : "⊟";
+  outlineCollapseButton.title = allCollapsed ? "全部展开" : "全部折叠";
+  outlineCollapseButton.setAttribute("aria-label", outlineCollapseButton.title);
+  outlineCollapseButton.disabled = expandableRows.length === 0;
 
   outlineTree.innerHTML = "";
   if (!headings.length) {
     const empty = document.createElement("div");
     empty.className = "outline-empty";
-    empty.textContent = "No headings";
+    empty.textContent = "暂无标题";
     outlineTree.append(empty);
     return;
   }
@@ -1167,7 +1272,7 @@ function setupLinkClicks() {
     if (!externalUrl) return;
     event.preventDefault();
     openExternalUrl(externalUrl).catch((error) => {
-      saveState.textContent = "Link open failed";
+      saveState.textContent = "链接打开失败";
       console.error(error);
     });
   });
@@ -1288,7 +1393,7 @@ function setEditorMode(mode) {
   }
 
   editorSurface.classList.toggle("source-mode", sourceMode);
-  document.querySelectorAll(".mode-switcher button").forEach((item) => {
+  document.querySelectorAll(".mode-switcher button[data-mode]").forEach((item) => {
     item.classList.toggle("active", item.dataset.mode === mode);
   });
   editorState.textContent = sourceMode ? "Markdown Source Mode" : "WYSIWYG Mode";
@@ -1330,9 +1435,59 @@ document.querySelector(".format-tools").addEventListener("click", (event) => {
   if (actions[action]) actions[action]();
 });
 
-setupSidebarControls();
-setupSidebarViews();
 setupLinkClicks();
+
+function setOutlineOpen(open) {
+  workspace.classList.toggle("sidebar-collapsed", !open);
+  outlineToggleButton.classList.toggle("active", open);
+  outlineToggleButton.setAttribute("aria-pressed", String(open));
+  localStorage.setItem("mojian-outline-open", String(open));
+}
+
+setOutlineOpen(localStorage.getItem("mojian-outline-open") !== "false");
+const savedOutlineWidth = Number(localStorage.getItem("mojian-outline-width"));
+if (Number.isFinite(savedOutlineWidth)) {
+  workspace.style.setProperty("--outline-width", `${Math.min(520, Math.max(180, savedOutlineWidth))}px`);
+}
+outlineToggleButton.addEventListener("click", () => {
+  setOutlineOpen(workspace.classList.contains("sidebar-collapsed"));
+});
+outlineCollapseButton.addEventListener("click", () => {
+  const headings = editorSurface.classList.contains("source-mode")
+    ? getSourceHeadings(sourceEditor.value)
+    : getEditorHeadings();
+  const sourceHeadings = getSourceHeadings(editorSurface.classList.contains("source-mode") ? sourceEditor.value : markdown);
+  const rows = getOutlineRows(headings.length ? headings : sourceHeadings, sourceHeadings);
+  const expandableRows = rows.filter((row) => row.hasChildren);
+  const allCollapsed = expandableRows.length > 0 && expandableRows.every((row) => collapsedOutlineItems.has(row.key));
+
+  if (allCollapsed) collapsedOutlineItems.clear();
+  else expandableRows.forEach((row) => collapsedOutlineItems.add(row.key));
+  updateOutline();
+});
+outlineResizer.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  setOutlineOpen(true);
+  workspace.classList.add("resizing-sidebar");
+  outlineResizer.setPointerCapture(event.pointerId);
+  const workspaceLeft = workspace.getBoundingClientRect().left;
+
+  const resize = (moveEvent) => {
+    const width = Math.min(520, Math.max(180, moveEvent.clientX - workspaceLeft));
+    workspace.style.setProperty("--outline-width", `${width}px`);
+    localStorage.setItem("mojian-outline-width", String(width));
+  };
+  const stopResize = () => {
+    workspace.classList.remove("resizing-sidebar");
+    outlineResizer.removeEventListener("pointermove", resize);
+    outlineResizer.removeEventListener("pointerup", stopResize);
+    outlineResizer.removeEventListener("pointercancel", stopResize);
+  };
+  outlineResizer.addEventListener("pointermove", resize);
+  outlineResizer.addEventListener("pointerup", stopResize);
+  outlineResizer.addEventListener("pointercancel", stopResize);
+});
 outlineTree.addEventListener("click", (event) => {
   const button = event.target.closest(".outline-item");
   if (!button) return;
@@ -1344,7 +1499,6 @@ outlineTree.addEventListener("click", (event) => {
     updateOutline();
     return;
   }
-
   jumpToOutlineItem(button);
 });
 
@@ -1548,18 +1702,6 @@ async function openDesktopFolderPath(path) {
 async function openDroppedPaths(paths) {
   if (!runningInTauri() || !paths?.length) return;
 
-  for (const path of paths) {
-    try {
-      if (await invokeDesktop("path_kind", { path }) === "directory") {
-        localStorage.setItem(LAST_FOLDER_KEY, path);
-        await openDesktopFolderPath(path);
-        return;
-      }
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
   const filePath = paths.find((path) => isEditableFile(path));
   if (filePath) {
     await openTreeFile(filePath);
@@ -1579,7 +1721,7 @@ async function setupNativeDragDrop() {
   await currentWebview.onDragDropEvent((event) => {
     const payload = event.payload;
     if (payload?.type === "over") {
-      saveState.textContent = "松开以打开文件或文件夹";
+      saveState.textContent = "松开以打开文件";
     } else if (payload?.type === "drop") {
       openDroppedPaths(payload.paths);
     } else if (payload?.type === "leave" || payload?.type === "cancel") {
@@ -1619,13 +1761,6 @@ async function bindUnsavedDocumentToPath() {
     currentFileHandle = null;
     currentFilePath = path;
     localStorage.setItem(LAST_FILE_KEY, path);
-    const parentPath = parentDirectoryFromPath(path);
-    if (parentPath) {
-      desktopFolderPath = parentPath;
-      localStorage.setItem(LAST_FOLDER_KEY, parentPath);
-      folderHandle = null;
-      folderName.textContent = parentPath.split(/[\\/]/).at(-1);
-    }
     documentName.readOnly = true;
     documentName.title = path;
     documentName.value = fileDisplayName(path.split(/[\\/]/).at(-1));
@@ -1658,7 +1793,7 @@ async function saveCurrentDocument(options = {}) {
   if (options.auto && !hasSaveTarget()) return false;
 
   clearTimeout(saveTimer);
-  saveState.textContent = "Saving...";
+  saveState.textContent = "正在保存…";
   isSaving = true;
   if (!editorSurface.classList.contains("source-mode")) markdown = editor.getMarkdown();
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ name: documentName.value.trim() || "Untitled", content: markdown }));
@@ -1666,13 +1801,13 @@ async function saveCurrentDocument(options = {}) {
     try {
       const bound = await bindUnsavedDocumentToPath();
       if (!bound) {
-        saveState.textContent = "Save canceled";
+        saveState.textContent = "已取消保存";
         isSaving = false;
         return false;
       }
     } catch (error) {
       if (error.name !== "AbortError") {
-        saveState.textContent = `Save path failed: ${error.message || error}`;
+        saveState.textContent = "保存路径选择失败";
         console.error(error);
       }
       isSaving = false;
@@ -1688,11 +1823,11 @@ async function saveCurrentDocument(options = {}) {
       await writable.close();
     }
     setActiveTreeFile();
-    markDocumentSaved("Saved");
+    markDocumentSaved("已保存");
     isSaving = false;
     return true;
   } catch (error) {
-    saveState.textContent = "Save failed";
+    saveState.textContent = "保存失败";
     console.error(error);
     isSaving = false;
     return false;
@@ -1703,12 +1838,12 @@ function markDocumentChanged() {
     clearTimeout(saveTimer);
     isDirty = false;
     syncDirtyState(false);
-    if (saveState.textContent === "Unsaved") saveState.textContent = "Saved";
+    if (saveState.textContent === "未保存") saveState.textContent = "已保存";
     return;
   }
   isDirty = true;
   syncDirtyState(true);
-  saveState.textContent = "Unsaved";
+  saveState.textContent = "未保存";
   scheduleAutoSave();
 }
 async function createNewFile() {
@@ -1720,14 +1855,6 @@ async function createNewFile() {
       if (!path) return;
 
       await invokeDesktop("write_text_file", { path, content: "" });
-      const parentPath = parentDirectoryFromPath(path);
-      if (parentPath) {
-        desktopFolderPath = parentPath;
-        localStorage.setItem(LAST_FOLDER_KEY, parentPath);
-        folderHandle = null;
-        folderName.textContent = parentPath.split(/[\\/]/).at(-1);
-      }
-
       currentFileHandle = null;
       currentFilePath = path;
       localStorage.setItem(LAST_FILE_KEY, path);
@@ -1737,13 +1864,12 @@ async function createNewFile() {
       setMarkdown("");
       setActiveTreeFile();
       updateDocumentTitle();
-      markDocumentSaved("New file created");
-      refreshFileTree().catch(console.error);
+      markDocumentSaved("已新建文件");
       return;
     }
 
     if (typeof globalThis.showSaveFilePicker !== "function") {
-      saveState.textContent = "Current browser cannot create files";
+      saveState.textContent = "当前浏览器不支持新建文件";
       return;
     }
 
@@ -1767,10 +1893,10 @@ async function createNewFile() {
     setMarkdown("");
     setActiveTreeFile();
     updateDocumentTitle();
-    markDocumentSaved("New file created");
+    markDocumentSaved("已新建文件");
   } catch (error) {
     if (error.name === "AbortError") return;
-    saveState.textContent = "New file failed";
+    saveState.textContent = "新建文件失败";
     console.error(error);
   }
 }
@@ -1800,7 +1926,7 @@ async function openTreeFile(path) {
     setMarkdown(content);
     setActiveTreeFile();
     updateDocumentTitle();
-    markDocumentSaved("Opened");
+    markDocumentSaved("已打开");
     saveState.textContent = "已打开";
   } catch (error) {
     saveState.textContent = "文件打开失败";
@@ -1818,43 +1944,12 @@ async function openSingleFile() {
   await openTreeFile(path);
 }
 
-async function openFolder() {
-  if (!runningInTauri() && typeof globalThis.showDirectoryPicker !== "function") {
-    saveState.textContent = "当前浏览器不支持打开文件夹";
-    return;
-  }
-  try {
-    if (runningInTauri()) {
-      const selectedPath = await invokeDesktop("choose_folder");
-      if (!selectedPath) return;
-      desktopFolderPath = selectedPath;
-      localStorage.setItem(LAST_FOLDER_KEY, selectedPath);
-      folderHandle = null;
-      folderName.textContent = selectedPath.split(/[\\/]/).at(-1);
-    } else {
-      folderHandle = await globalThis.showDirectoryPicker({ mode: "readwrite" });
-      desktopFolderPath = "";
-      folderName.textContent = folderHandle.name;
-    }
-    currentFileHandle = null;
-    currentFilePath = "";
-    await refreshFileTree();
-    saveState.textContent = "文件夹已打开";
-  } catch (error) {
-    if (error.name !== "AbortError") {
-      saveState.textContent = "文件夹打开失败";
-      console.error(error);
-    }
-  }
-}
-
 documentName.addEventListener("input", () => {
   updateDocumentTitle();
   markDocumentChanged();
 });
 newFileButton.addEventListener("click", createNewFile);
 saveFileButton.addEventListener("click", saveCurrentDocument);
-openFolderButton.addEventListener("click", openFolder);
 settingsButton.addEventListener("click", openSettings);
 settingsCloseButton.addEventListener("click", closeSettings);
 settingsSaveButton.addEventListener("click", () => {
@@ -1885,8 +1980,6 @@ autoSaveSetting?.addEventListener("change", () => {
 document.querySelectorAll("input[name='startup-behavior']").forEach((input) => {
   input.addEventListener("change", saveSettings);
 });
-emptyTreeAction.addEventListener("click", openFolder);
-refreshTreeButton.addEventListener("click", refreshFileTree);
 document.querySelector("#open-button").addEventListener("click", openSingleFile);
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
@@ -1917,7 +2010,6 @@ async function bootstrap() {
   populateSettingsForm();
   setupCloseGuard().catch(console.error);
   const savedDocument = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
-  const lastFolder = localStorage.getItem(LAST_FOLDER_KEY);
   const lastFile = localStorage.getItem(LAST_FILE_KEY);
   const startupPaths = runningInTauri() ? await invokeDesktop("startup_paths") : [];
 
@@ -1934,9 +2026,6 @@ async function bootstrap() {
     documentName.value = "未命名文档";
     setMarkdown("");
     saveState.textContent = "新文件";
-  } else if (settings.startupBehavior === "last-folder" && runningInTauri() && lastFolder) {
-    documentName.value = savedDocument?.name || "欢迎使用墨笺";
-    await openDesktopFolderPath(lastFolder);
   } else if (settings.startupBehavior === "last-file" && runningInTauri() && lastFile) {
     await openTreeFile(lastFile);
   } else {
@@ -1951,14 +2040,8 @@ async function bootstrap() {
 
   updateDocumentTitle();
 
-  if (!runningInTauri() && typeof globalThis.showDirectoryPicker !== "function") {
-    openFolderButton.title = "请通过 localhost 或 HTTPS 使用支持 File System Access API 的 Chromium 浏览器";
-  }
   applyTheme(localStorage.getItem(THEME_KEY) || "light");
   setupNativeDragDrop();
 }
 
-if (!runningInTauri() && typeof globalThis.showDirectoryPicker !== "function") {
-  openFolderButton.title = "请通过 localhost 或 HTTPS 使用支持 File System Access API 的 Chromium 浏览器";
-}
 bootstrap();
