@@ -8,6 +8,7 @@ import TaskItem from "@tiptap/extension-task-item";
 import { Plugin } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { DOMSerializer } from "@tiptap/pm/model";
+import { formatIndentedTree } from "./tree-format.js";
 
 const STORAGE_KEY = "mojian-markdown-document";
 const THEME_KEY = "mojian-theme";
@@ -97,6 +98,8 @@ const SHORTCUTS = {
   bullet: "Mod+Alt+U",
   number: "Mod+Alt+O",
   task: "Mod+Alt+X",
+  "indent-list": "Mod+]",
+  "outdent-list": "Mod+[",
   table: "Mod+Alt+T",
   "block-code": "Mod+Alt+C",
   "clear-format": "Mod+Alt+Backspace",
@@ -969,6 +972,7 @@ function setMarkdown(content) {
 }
 
 function updateToolbarState() {
+  const listItemType = activeListItemType();
   const active = {
     heading: editor.isActive("heading"),
     bold: editor.isActive("bold"),
@@ -980,12 +984,20 @@ function updateToolbarState() {
     bullet: editor.isActive("bulletList"),
     number: editor.isActive("orderedList"),
     task: editor.isActive("taskList"),
+    "indent-list": false,
+    "outdent-list": false,
     table: editor.isActive("table"),
     "block-code": editor.isActive("codeBlock"),
+    tree: false,
     "clear-format": false,
   };
   document.querySelectorAll(".format-tools button[data-action]").forEach((button) => {
     button.classList.toggle("active", Boolean(active[button.dataset.action]));
+    if (button.dataset.action === "indent-list") {
+      button.disabled = !listItemType || !editor.can().sinkListItem(listItemType);
+    } else if (button.dataset.action === "outdent-list") {
+      button.disabled = !listItemType || !editor.can().liftListItem(listItemType);
+    }
   });
 }
 
@@ -1296,8 +1308,59 @@ function toggleSingleCodeBlock() {
   return true;
 }
 
+function treeifySelection() {
+  if (editorSurface.classList.contains("source-mode")) {
+    const { selectionStart, selectionEnd, value } = sourceEditor;
+    const treeText = formatIndentedTree(value.slice(selectionStart, selectionEnd));
+    if (!treeText) {
+      saveState.textContent = "请先选中至少两行缩进文本";
+      return false;
+    }
+
+    const leadingBreak = selectionStart > 0 && value[selectionStart - 1] !== "\n" ? "\n" : "";
+    const trailingBreak = selectionEnd < value.length && value[selectionEnd] !== "\n" ? "\n" : "";
+    const fencedTree = `${leadingBreak}\`\`\`\n${treeText}\n\`\`\`${trailingBreak}`;
+    sourceEditor.setRangeText(fencedTree, selectionStart, selectionEnd, "select");
+    sourceEditor.dispatchEvent(new Event("input"));
+    sourceEditor.focus();
+    return true;
+  }
+
+  const { state, view } = editor;
+  const { from, to, empty } = state.selection;
+  const treeText = empty ? "" : formatIndentedTree(state.doc.textBetween(from, to, "\n"));
+  if (!treeText) {
+    saveState.textContent = "请先选中至少两行缩进文本";
+    return false;
+  }
+
+  const codeBlock = state.schema.nodes.codeBlock.create(
+    { language: null },
+    state.schema.text(treeText),
+  );
+  view.dispatch(state.tr.replaceRangeWith(from, to, codeBlock).scrollIntoView());
+  view.focus();
+  return true;
+}
+
 function clearFormatting() {
   editor.chain().focus().unsetAllMarks().clearNodes().run();
+}
+
+function activeListItemType() {
+  if (editor.isActive("taskItem")) return "taskItem";
+  if (editor.isActive("listItem")) return "listItem";
+  return "";
+}
+
+function changeListDepth(direction) {
+  const itemType = activeListItemType();
+  if (!itemType) return false;
+  const changed = direction === "in"
+    ? editor.commands.sinkListItem(itemType)
+    : editor.commands.liftListItem(itemType);
+  if (changed) updateToolbarState();
+  return changed;
 }
 
 const actions = {
@@ -1317,8 +1380,11 @@ const actions = {
   bullet: () => editor.commands.toggleBulletList(),
   number: () => editor.commands.toggleOrderedList(),
   task: () => editor.commands.toggleTaskList(),
+  "indent-list": () => changeListDepth("in"),
+  "outdent-list": () => changeListDepth("out"),
   table: () => editor.commands.insertTable({ rows: 3, cols: 3, withHeaderRow: true }),
   "block-code": toggleSingleCodeBlock,
+  tree: treeifySelection,
   "clear-format": clearFormatting,
 };
 
@@ -1541,7 +1607,35 @@ sourceEditor.addEventListener("input", () => {
 sourceEditor.addEventListener("keydown", (event) => {
   if (event.key === "Tab") {
     event.preventDefault();
-    sourceEditor.setRangeText("  ", sourceEditor.selectionStart, sourceEditor.selectionEnd, "end");
+    const value = sourceEditor.value;
+    const selectionStart = sourceEditor.selectionStart;
+    const selectionEnd = sourceEditor.selectionEnd;
+    const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+    let lineEnd = value.indexOf("\n", selectionEnd);
+    if (lineEnd < 0) lineEnd = value.length;
+
+    const selectedLines = value.slice(lineStart, lineEnd);
+    const lines = selectedLines.split("\n");
+    let firstLineDelta = 0;
+    let totalDelta = 0;
+    const replacement = lines.map((line, index) => {
+      if (!event.shiftKey) {
+        if (index === 0) firstLineDelta = 2;
+        totalDelta += 2;
+        return `  ${line}`;
+      }
+
+      const indentation = line.match(/^(?: {1,2}|\t)/)?.[0] || "";
+      if (index === 0) firstLineDelta = -indentation.length;
+      totalDelta -= indentation.length;
+      return line.slice(indentation.length);
+    }).join("\n");
+
+    sourceEditor.setRangeText(replacement, lineStart, lineEnd, "preserve");
+    sourceEditor.setSelectionRange(
+      Math.max(lineStart, selectionStart + firstLineDelta),
+      Math.max(lineStart, selectionEnd + totalDelta),
+    );
     sourceEditor.dispatchEvent(new Event("input"));
   }
 });

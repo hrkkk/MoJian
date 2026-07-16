@@ -342,8 +342,13 @@ button { color: inherit; }
 .tiptap-editor .selectedCell { background: var(--accent-soft); }
 .tiptap-editor .tableWrapper { overflow-x: auto; }
 .tiptap-editor ul[data-type="taskList"] { padding-left: 0; list-style: none; }
-.tiptap-editor ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 8px; }
-.tiptap-editor ul[data-type="taskList"] li > div { flex: 1; }
+.tiptap-editor ul[data-type="taskList"] > li { display: flex; align-items: flex-start; gap: 8px; }
+.tiptap-editor ul[data-type="taskList"] > li > div { flex: 1; }
+.tiptap-editor ul[data-type="taskList"] ul[data-type="taskList"] { padding-left: 1.8em; }
+.format-tools button:disabled {
+  cursor: default;
+  opacity: .38;
+}
 
 #source-editor {
   width: 100%;

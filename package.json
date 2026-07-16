@@ -4,7 +4,7 @@
   "private": true,
   "description": "A calm WYSIWYG Markdown editor for web and desktop.",
   "scripts": {
-    "test": "node --check app.js",
+    "test": "node --check app.js && node --check tree-format.js",
     "build:web": "vite build",
     "preview:web": "vite preview",
     "tauri": "tauri",
