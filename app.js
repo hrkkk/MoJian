@@ -5,7 +5,7 @@ import { TableKit } from "@tiptap/extension-table";
 import CodeBlock from "@tiptap/extension-code-block";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
-import { Plugin } from "@tiptap/pm/state";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { DOMSerializer } from "@tiptap/pm/model";
 import { formatIndentedTree } from "./tree-format.js";
@@ -14,12 +14,18 @@ const STORAGE_KEY = "mojian-markdown-document";
 const THEME_KEY = "mojian-theme";
 const SETTINGS_KEY = "mojian-settings";
 const LAST_FILE_KEY = "mojian-last-file";
+const DEFAULT_CONTENT_FONT_NAME = "Open Sans";
+const DEFAULT_CODE_FONT_NAME = "Cascadia Code";
+const DEFAULT_CONTENT_FONT_STACK = '"Open Sans", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif';
+const DEFAULT_CODE_FONT_STACK = '"Cascadia Code", "SFMono-Regular", Consolas, monospace';
 
 const DEFAULT_SETTINGS = {
   startupBehavior: "last-file",
-  fontFamily: '"Open Sans", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif',
+  fontName: DEFAULT_CONTENT_FONT_NAME,
+  codeFontName: DEFAULT_CODE_FONT_NAME,
   fontSize: 16,
   autoSave: false,
+  copyListMarkers: true,
 };
 
 const sourceEditor = document.querySelector("#source-editor");
@@ -39,7 +45,9 @@ const settingsCloseButton = document.querySelector("#settings-close-button");
 const settingsSaveButton = document.querySelector("#settings-save-button");
 const settingsResetButton = document.querySelector("#settings-reset-button");
 const autoSaveSetting = document.querySelector("#auto-save-setting");
+const copyListMarkersSetting = document.querySelector("#copy-list-markers-setting");
 const fontFamilySetting = document.querySelector("#font-family-setting");
+const codeFontFamilySetting = document.querySelector("#code-font-family-setting");
 const fontSizeSetting = document.querySelector("#font-size-setting");
 const unsavedModal = document.querySelector("#unsaved-modal");
 const workspace = document.querySelector(".workspace");
@@ -363,23 +371,53 @@ function escapeHtmlAttribute(value) {
 
 function loadSettings() {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
+    const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      fontName: stored.fontName || firstFontName(stored.fontFamily, DEFAULT_CONTENT_FONT_NAME),
+      codeFontName: stored.codeFontName || firstFontName(stored.codeFontFamily, DEFAULT_CODE_FONT_NAME),
+    };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
 }
 
+function firstFontName(value, fallback) {
+  const firstName = String(value || "").split(",", 1)[0].trim().replace(/^['"]|['"]$/g, "");
+  return firstName || fallback;
+}
+
+function fontStack(fontName, defaultName, fallbackStack) {
+  const normalizedName = String(fontName || "")
+    .trim()
+    .replace(/["\\\n\r\f]/g, "");
+  if (!normalizedName || normalizedName.toLowerCase() === defaultName.toLowerCase()) return fallbackStack;
+  return `"${normalizedName}", ${fallbackStack}`;
+}
+
 function saveSettings() {
   settings.startupBehavior = document.querySelector("input[name='startup-behavior']:checked")?.value || DEFAULT_SETTINGS.startupBehavior;
   settings.autoSave = Boolean(autoSaveSetting?.checked);
-  settings.fontFamily = fontFamilySetting.value || DEFAULT_SETTINGS.fontFamily;
+  settings.copyListMarkers = Boolean(copyListMarkersSetting?.checked);
+  settings.fontName = fontFamilySetting.value.trim() || DEFAULT_SETTINGS.fontName;
+  settings.codeFontName = codeFontFamilySetting.value.trim() || DEFAULT_SETTINGS.codeFontName;
+  delete settings.fontFamily;
+  delete settings.codeFontFamily;
   settings.fontSize = Math.min(28, Math.max(12, Number(fontSizeSetting.value) || DEFAULT_SETTINGS.fontSize));
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   applyEditorSettings();
 }
 
 function applyEditorSettings() {
-  document.documentElement.style.setProperty("--content-font", settings.fontFamily);
+  document.documentElement.style.setProperty(
+    "--content-font",
+    fontStack(settings.fontName, DEFAULT_CONTENT_FONT_NAME, DEFAULT_CONTENT_FONT_STACK),
+  );
+  document.documentElement.style.setProperty(
+    "--code-font",
+    fontStack(settings.codeFontName, DEFAULT_CODE_FONT_NAME, DEFAULT_CODE_FONT_STACK),
+  );
   document.documentElement.style.setProperty("--content-font-size", `${settings.fontSize}px`);
 }
 
@@ -387,7 +425,9 @@ function populateSettingsForm() {
   const behavior = document.querySelector(`input[name='startup-behavior'][value='${settings.startupBehavior}']`);
   if (behavior) behavior.checked = true;
   if (autoSaveSetting) autoSaveSetting.checked = Boolean(settings.autoSave);
-  fontFamilySetting.value = settings.fontFamily;
+  if (copyListMarkersSetting) copyListMarkersSetting.checked = Boolean(settings.copyListMarkers);
+  fontFamilySetting.value = settings.fontName;
+  codeFontFamilySetting.value = settings.codeFontName;
   fontSizeSetting.value = settings.fontSize;
 }
 
@@ -551,21 +591,46 @@ function updateInlineMarkdownMarker(range, value) {
   editor.view.focus();
 }
 
+const activeMarkdownSyntaxKey = new PluginKey("activeMarkdownSyntax");
+
 const ActiveMarkdownSyntax = Extension.create({
   name: "activeMarkdownSyntax",
   addProseMirrorPlugins() {
     return [
       new Plugin({
+        key: activeMarkdownSyntaxKey,
+        state: {
+          init: () => ({ position: null }),
+          apply(transaction, value) {
+            const action = transaction.getMeta(activeMarkdownSyntaxKey);
+            if (action?.type === "activate") return { position: action.position };
+            if (action?.type === "clear" || transaction.selectionSet) return { position: null };
+            return value;
+          },
+        },
         props: {
+          handleClick(view) {
+            if (activeMarkdownSyntaxKey.getState(view.state)?.position === null) return false;
+            view.dispatch(view.state.tr.setMeta(activeMarkdownSyntaxKey, { type: "clear" }));
+            return false;
+          },
+          handleDoubleClick(view, position, event) {
+            if (event.target instanceof Element && event.target.closest(".markdown-syntax-marker")) return false;
+            requestAnimationFrame(() => {
+              if (view.isDestroyed) return;
+              view.dispatch(view.state.tr.setMeta(activeMarkdownSyntaxKey, { type: "activate", position }));
+            });
+            return false;
+          },
           decorations(state) {
-            const { $from } = state.selection;
+            const activationPosition = activeMarkdownSyntaxKey.getState(state)?.position;
+            if (activationPosition === null || activationPosition === undefined) return DecorationSet.empty;
+
+            const $from = state.doc.resolve(Math.min(activationPosition, state.doc.content.size));
             if (!$from.parent.isTextblock) return DecorationSet.empty;
 
             const block = $from.parent;
             const blockStart = $from.start();
-            const selectionFrom = state.selection.from;
-            const selectionTo = state.selection.to;
-            const selectionEmpty = state.selection.empty;
             const decorations = [];
             const markerPairs = {
               bold: ["**", "**"],
@@ -621,14 +686,9 @@ const ActiveMarkdownSyntax = Extension.create({
               }
             });
 
-            const activeRanges = ranges.filter((range) => {
-              if (!selectionEmpty) return selectionFrom < range.to && selectionTo > range.from;
-              if (selectionFrom < range.from || selectionFrom > range.to) return false;
-              return $from.marks().some((mark) => {
-                const signature = `${mark.type.name}:${JSON.stringify(mark.attrs || {})}`;
-                return signature === range.signature;
-              });
-            });
+            const activeRanges = ranges.filter(
+              (range) => activationPosition >= range.from && activationPosition <= range.to,
+            );
 
             for (const range of activeRanges) {
               const key = `${range.type}:${range.from}:${range.to}`;
@@ -902,6 +962,14 @@ function serializeClipboardText(fragment) {
 function copyListSelection(view, event) {
   const slice = view.state.selection.content();
   if (!event.clipboardData || !containsListNode(slice.content)) return false;
+
+  if (!settings.copyListMarkers) {
+    const text = slice.content.textBetween(0, slice.content.size, "\n", "\n").trim();
+    event.clipboardData.clearData();
+    event.clipboardData.setData("text/plain", text);
+    event.preventDefault();
+    return true;
+  }
 
   const container = document.createElement("div");
   container.append(DOMSerializer.fromSchema(view.state.schema).serializeFragment(slice.content));
@@ -1344,7 +1412,17 @@ function treeifySelection() {
 }
 
 function clearFormatting() {
-  editor.chain().focus().unsetAllMarks().clearNodes().run();
+  const { from, to } = editor.state.selection;
+  let selectionContainsList = editor.isActive("listItem") || editor.isActive("taskItem");
+  editor.state.doc.nodesBetween(from, to, (node) => {
+    if (["orderedList", "bulletList", "taskList", "listItem", "taskItem"].includes(node.type.name)) {
+      selectionContainsList = true;
+    }
+  });
+
+  const chain = editor.chain().focus().unsetAllMarks();
+  if (!selectionContainsList) chain.clearNodes();
+  chain.run();
 }
 
 function activeListItemType() {
@@ -2064,6 +2142,9 @@ settingsModal.addEventListener("keydown", (event) => {
 fontFamilySetting.addEventListener("change", () => {
   saveSettings();
 });
+codeFontFamilySetting.addEventListener("change", () => {
+  saveSettings();
+});
 fontSizeSetting.addEventListener("input", () => {
   saveSettings();
 });
@@ -2071,6 +2152,7 @@ autoSaveSetting?.addEventListener("change", () => {
   saveSettings();
   if (settings.autoSave && isDirty) scheduleAutoSave();
 });
+copyListMarkersSetting?.addEventListener("change", saveSettings);
 document.querySelectorAll("input[name='startup-behavior']").forEach((input) => {
   input.addEventListener("change", saveSettings);
 });

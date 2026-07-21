@@ -14,6 +14,7 @@
   --edit-border: #d9d9d9;
   --content-font: "Open Sans", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   --content-font-size: 16px;
+  --code-font: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   --sans: "Open Sans", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
 }
@@ -375,7 +376,7 @@ button { color: inherit; }
 .markdown-body p { margin: .75em 0; }
 .markdown-body a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .markdown-body blockquote { margin: 1.2em 0; padding: .1em 1em; border-left: 4px solid #dfe2e5; background: transparent; color: #777777; }
-.markdown-body code { padding: .18em .38em; border-radius: 4px; background: var(--code-bg); color: var(--accent); font: .88em var(--mono); }
+.markdown-body code { padding: .18em .38em; border-radius: 4px; background: var(--code-bg); color: var(--accent); font: .88em var(--code-font); }
 .markdown-body pre { overflow: auto; padding: 17px 19px; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg); line-height: 1.65; }
 .markdown-body pre code { padding: 0; background: transparent; color: var(--text); }
 .syntax-comment { color: #6a737d; font-style: italic; }
@@ -509,6 +510,8 @@ html[data-theme="dark"] .syntax-variable { color: #ffa657; }
   top: 74px;
   right: 28px;
   width: min(440px, calc(100vw - 40px));
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--paper);

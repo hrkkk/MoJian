@@ -112,21 +112,28 @@
         </div>
 
         <div class="settings-section">
+          <h3>拷贝选项</h3>
+          <label class="checkbox-row">
+            <input id="copy-list-markers-setting" type="checkbox" />
+            <span>拷贝列表项时包含序号或项目符号</span>
+          </label>
+        </div>
+
+        <div class="settings-section">
           <h3>编辑器字体</h3>
           <label class="field-row">
             <span>字体</span>
-            <select id="font-family-setting">
-              <option value='"Open Sans", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif'>默认无衬线</option>
-              <option value='"Microsoft YaHei", "Segoe UI", system-ui, sans-serif'>微软雅黑</option>
-              <option value='"Segoe UI", "Microsoft YaHei", system-ui, sans-serif'>Segoe UI</option>
-              <option value='Georgia, "Times New Roman", serif'>Georgia</option>
-              <option value='"Cascadia Code", Consolas, monospace'>Cascadia Code</option>
-            </select>
+            <input id="font-family-setting" type="text" placeholder="例如：Microsoft YaHei" spellcheck="false" />
+          </label>
+          <label class="field-row">
+            <span>代码字体</span>
+            <input id="code-font-family-setting" type="text" placeholder="例如：JetBrains Mono" spellcheck="false" />
           </label>
           <label class="field-row">
             <span>字号</span>
             <input id="font-size-setting" type="number" min="12" max="28" step="1" />
           </label>
+          <p class="settings-note">输入本机已安装的字体名称；字体不存在时会自动回退到默认字体。</p>
         </div>
 
         <footer class="settings-panel-footer">
