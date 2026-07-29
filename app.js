@@ -156,6 +156,8 @@ let lastSyncedDirtyState = null;
 let applyingContent = false;
 let currentFileHandle = null;
 let currentFilePath = "";
+let tableTools = null;
+let activeTableCell = null;
 let settings = loadSettings();
 let sharedScrollTop = 0;
 
@@ -1024,7 +1026,10 @@ const editor = new Editor({
     refreshImageSources();
     markDocumentChanged();
   },
-  onSelectionUpdate: updateToolbarState,
+  onSelectionUpdate: () => {
+    updateToolbarState();
+    updateTableTools();
+  },
 });
 
 function setMarkdown(content) {
@@ -1328,6 +1333,36 @@ function toExternalUrl(href) {
   }
 }
 
+function toFilePath(href) {
+  const trimmed = href.trim();
+  if (!trimmed) return null;
+
+  if (/^file:/i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      let path = decodeURIComponent(url.pathname);
+      if (/^\/[a-z]:/i.test(path)) path = path.slice(1);
+      if (url.hostname) {
+        path = /Windows/i.test(navigator.userAgent)
+          ? `\\\\${url.hostname}${path.replaceAll("/", "\\")}`
+          : `//${url.hostname}${path}`;
+      }
+      return path;
+    } catch {
+      return null;
+    }
+  }
+
+  // Keep Windows drive paths, but reject unsupported URI schemes.
+  if (!/^[a-z]:[\\/]/i.test(trimmed) && /^[a-z][a-z\d+.-]*:/i.test(trimmed)) return null;
+  const path = trimmed.split(/[?#]/, 1)[0];
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
 async function openExternalUrl(url) {
   if (runningInTauri()) {
     await invokeDesktop("open_external_url", { url });
@@ -1336,26 +1371,134 @@ async function openExternalUrl(url) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+async function openLinkedFile(path) {
+  if (!path) throw new Error("File path is empty");
+  if (runningInTauri()) {
+    await invokeDesktop("open_file_path", {
+      path,
+      documentPath: currentFilePath || null,
+    });
+    return;
+  }
+  window.open(path, "_blank", "noopener,noreferrer");
+}
+
 function setupLinkClicks() {
   editor.view.dom.addEventListener("click", (event) => {
     const link = event.target.closest("a[href]");
     if (!link || !editor.view.dom.contains(link)) return;
+    event.preventDefault();
+
+    // Plain clicks remain editing/selection gestures. Links are activated only
+    // with Ctrl+left click (Command+left click on macOS).
+    if (event.button !== 0 || (!event.ctrlKey && !event.metaKey)) return;
+
     const href = link.getAttribute("href") || "";
 
     if (href.startsWith("#")) {
-      event.preventDefault();
       jumpToAnchor(href);
       return;
     }
 
     const externalUrl = toExternalUrl(href);
-    if (!externalUrl) return;
-    event.preventDefault();
-    openExternalUrl(externalUrl).catch((error) => {
+    const operation = externalUrl
+      ? openExternalUrl(externalUrl)
+      : openLinkedFile(toFilePath(href));
+    operation.catch((error) => {
       saveState.textContent = "链接打开失败";
       console.error(error);
     });
   });
+}
+
+const TABLE_ACTIONS = {
+  "row-before": "addRowBefore",
+  "row-after": "addRowAfter",
+  "column-before": "addColumnBefore",
+  "column-after": "addColumnAfter",
+  "delete-row": "deleteRow",
+  "delete-column": "deleteColumn",
+};
+
+function setupTableTools() {
+  tableTools = document.createElement("div");
+  tableTools.className = "table-tools";
+  tableTools.setAttribute("role", "toolbar");
+  tableTools.setAttribute("aria-label", "表格行列操作");
+  tableTools.innerHTML = `
+    <button type="button" data-table-action="row-before" title="在当前行上方添加一行">+ 上方行</button>
+    <button type="button" data-table-action="row-after" title="在当前行下方添加一行">+ 下方行</button>
+    <span class="table-tools-divider" aria-hidden="true"></span>
+    <button type="button" data-table-action="column-before" title="在当前列左侧添加一列">+ 左侧列</button>
+    <button type="button" data-table-action="column-after" title="在当前列右侧添加一列">+ 右侧列</button>
+    <span class="table-tools-divider" aria-hidden="true"></span>
+    <button class="danger" type="button" data-table-action="delete-row" title="删除当前行">删除行</button>
+    <button class="danger" type="button" data-table-action="delete-column" title="删除当前列">删除列</button>
+  `;
+  document.body.append(tableTools);
+
+  tableTools.addEventListener("mousedown", (event) => event.preventDefault());
+  tableTools.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-table-action]");
+    const command = TABLE_ACTIONS[button?.dataset.tableAction];
+    if (!command || button.disabled) return;
+    editor.chain().focus()[command]().run();
+    requestAnimationFrame(() => {
+      const selection = window.getSelection();
+      const node = selection?.anchorNode;
+      activeTableCell = (node?.nodeType === globalThis.Node.TEXT_NODE ? node.parentElement : node)?.closest?.("td, th")
+        || activeTableCell;
+      updateTableTools();
+    });
+  });
+
+  editor.view.dom.addEventListener("mousedown", () => {
+    activeTableCell = null;
+    updateTableTools();
+  });
+  editor.view.dom.addEventListener("dblclick", (event) => {
+    const cell = event.target.closest("td, th");
+    activeTableCell = cell && editor.view.dom.contains(cell) ? cell : null;
+    requestAnimationFrame(updateTableTools);
+  });
+  document.addEventListener("mousedown", (event) => {
+    if (tableTools.contains(event.target) || editor.view.dom.contains(event.target)) return;
+    activeTableCell = null;
+    updateTableTools();
+  });
+  editorPane.addEventListener("scroll", updateTableTools);
+  editor.view.dom.addEventListener("scroll", updateTableTools, true);
+  window.addEventListener("resize", updateTableTools);
+}
+
+function updateTableTools() {
+  if (!tableTools) return;
+  const hidden = editorSurface.classList.contains("source-mode")
+    || !activeTableCell?.isConnected
+    || !editor.isActive("table");
+  tableTools.classList.toggle("visible", !hidden);
+  if (hidden) return;
+
+  for (const button of tableTools.querySelectorAll("button[data-table-action]")) {
+    const command = TABLE_ACTIONS[button.dataset.tableAction];
+    button.disabled = !editor.can()[command]();
+  }
+
+  const cellRect = activeTableCell.getBoundingClientRect();
+  if (cellRect.bottom < 0 || cellRect.top > window.innerHeight) {
+    tableTools.classList.remove("visible");
+    return;
+  }
+  const toolsRect = tableTools.getBoundingClientRect();
+  const top = cellRect.top > toolsRect.height + 12
+    ? cellRect.top - toolsRect.height - 8
+    : cellRect.bottom + 8;
+  const left = Math.min(
+    window.innerWidth - toolsRect.width - 8,
+    Math.max(8, cellRect.left + (cellRect.width - toolsRect.width) / 2),
+  );
+  tableTools.style.top = `${Math.max(8, top)}px`;
+  tableTools.style.left = `${left}px`;
 }
 
 function toggleSingleCodeBlock() {
@@ -1541,6 +1684,8 @@ function setEditorMode(mode) {
     item.classList.toggle("active", item.dataset.mode === mode);
   });
   editorState.textContent = sourceMode ? "Markdown Source Mode" : "WYSIWYG Mode";
+  if (sourceMode) activeTableCell = null;
+  updateTableTools();
 
   if (sourceMode) {
     sourceEditor.focus({ preventScroll: true });
@@ -1580,6 +1725,7 @@ document.querySelector(".format-tools").addEventListener("click", (event) => {
 });
 
 setupLinkClicks();
+setupTableTools();
 
 function setOutlineOpen(open) {
   workspace.classList.toggle("sidebar-collapsed", !open);

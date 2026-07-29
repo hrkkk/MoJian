@@ -166,6 +166,56 @@ fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn open_file_path(path: String, document_path: Option<String>) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("File path is empty".into());
+    }
+
+    let requested_path = PathBuf::from(path);
+    let resolved_path = if requested_path.is_absolute() {
+        requested_path
+    } else {
+        let document_path = document_path
+            .ok_or_else(|| "Save the document before opening a relative link".to_string())?;
+        Path::new(&document_path)
+            .parent()
+            .ok_or_else(|| "Document path has no parent directory".to_string())?
+            .join(requested_path)
+    };
+    let resolved_path = fs::canonicalize(&resolved_path).map_err(|error| {
+        format!(
+            "Linked file does not exist or cannot be accessed ({}): {error}",
+            resolved_path.display()
+        )
+    })?;
+    let target = resolved_path.to_string_lossy().into_owned();
+
+    #[cfg(target_os = "windows")]
+    let status = Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &target])
+        .status()
+        .map_err(|error| error.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open")
+        .arg(&target)
+        .status()
+        .map_err(|error| error.to_string())?;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = Command::new("xdg-open")
+        .arg(&target)
+        .status()
+        .map_err(|error| error.to_string())?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Failed to open linked file: {status}"))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -224,7 +274,8 @@ pub fn run() {
             read_text_file,
             write_text_file,
             read_image_as_data_url,
-            open_external_url
+            open_external_url,
+            open_file_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mojian");

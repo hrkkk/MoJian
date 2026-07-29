@@ -342,6 +342,42 @@ button { color: inherit; }
 }
 .tiptap-editor .selectedCell { background: var(--accent-soft); }
 .tiptap-editor .tableWrapper { overflow-x: auto; }
+.table-tools {
+  position: fixed;
+  z-index: 30;
+  display: none;
+  align-items: center;
+  gap: 3px;
+  max-width: calc(100vw - 16px);
+  padding: 5px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .14);
+  white-space: nowrap;
+}
+.table-tools.visible { display: flex; }
+.table-tools button {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.table-tools button:hover { background: var(--accent-soft); }
+.table-tools button.danger { color: #c0392b; }
+.table-tools button:disabled { cursor: default; opacity: .35; }
+.table-tools-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--border);
+}
 .tiptap-editor ul[data-type="taskList"] { padding-left: 0; list-style: none; }
 .tiptap-editor ul[data-type="taskList"] > li { display: flex; align-items: flex-start; gap: 8px; }
 .tiptap-editor ul[data-type="taskList"] > li > div { flex: 1; }
@@ -428,9 +464,36 @@ html[data-theme="dark"] .syntax-variable { color: #ffa657; }
 .code-language-select:focus {
   color: var(--text);
 }
-.markdown-body table { width: 100%; margin: 1.2em 0; border-collapse: collapse; font-size: .92em; }
-.markdown-body th, .markdown-body td { padding: 9px 12px; border: 1px solid var(--border); text-align: left; }
+.markdown-body table {
+  width: 100%;
+  margin: 1.2em 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: .92em;
+}
+.markdown-body th, .markdown-body td {
+  position: relative;
+  height: auto;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  text-align: left;
+  vertical-align: top;
+}
 .markdown-body th { background: var(--code-bg); }
+.tiptap-editor.resize-cursor { cursor: col-resize; }
+.tiptap-editor .column-resize-handle {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: -2px;
+  bottom: -2px;
+  width: 4px;
+  background: var(--accent);
+  pointer-events: none;
+}
 .markdown-body img { max-width: 100%; border-radius: 8px; }
 .image-resize-wrapper {
   position: relative;
