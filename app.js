@@ -14,6 +14,8 @@ const STORAGE_KEY = "mojian-markdown-document";
 const THEME_KEY = "mojian-theme";
 const SETTINGS_KEY = "mojian-settings";
 const LAST_FILE_KEY = "mojian-last-file";
+const TABLE_WIDTHS_KEY = "mojian-table-column-widths";
+const TABLE_RESIZE_HANDLE_WIDTH = 8;
 const DEFAULT_CONTENT_FONT_NAME = "Open Sans";
 const DEFAULT_CODE_FONT_NAME = "Cascadia Code";
 const DEFAULT_CONTENT_FONT_STACK = '"Open Sans", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif';
@@ -158,6 +160,19 @@ let currentFileHandle = null;
 let currentFilePath = "";
 let tableTools = null;
 let activeTableCell = null;
+let tableToolsMode = null;
+let tableToolsAnchor = null;
+let tableRowHandle = null;
+let tableRowDropIndicator = null;
+let hoveredTableRow = null;
+let pendingTableDrag = null;
+let draggedTableRow = null;
+let tableRowDropTarget = null;
+let tableColumnHandle = null;
+let tableColumnDropIndicator = null;
+let hoveredTableColumn = null;
+let draggedTableColumn = null;
+let tableColumnDropTarget = null;
 let settings = loadSettings();
 let sharedScrollTop = 0;
 
@@ -998,7 +1013,7 @@ const editor = new Editor({
     ImageNode,
     CodeBlockWithLanguage,
     TableKit.configure({
-      table: { resizable: true },
+      table: { resizable: true, handleWidth: TABLE_RESIZE_HANDLE_WIDTH },
     }),
     TaskList,
     TaskItem.configure({ nested: true }),
@@ -1020,6 +1035,7 @@ const editor = new Editor({
   onUpdate: ({ editor: currentEditor }) => {
     if (applyingContent) return;
     markdown = currentEditor.getMarkdown();
+    persistTableColumnWidths();
     sourceEditor.value = markdown;
     updateStats();
     updateOutline();
@@ -1035,7 +1051,12 @@ const editor = new Editor({
 function setMarkdown(content) {
   applyingContent = true;
   markdown = content;
+  hoveredTableRow = null;
+  hoveredTableColumn = null;
+  hideTableDragHandles();
+  hideTableTools();
   editor.commands.setContent(content || "", { contentType: "markdown" });
+  restoreTableColumnWidths();
   sourceEditor.value = markdown;
   applyingContent = false;
   updateStats();
@@ -1420,82 +1441,773 @@ const TABLE_ACTIONS = {
   "delete-column": "deleteColumn",
 };
 
+function getTableContext(row) {
+  if (!row || !editor.view.dom.contains(row)) return null;
+  const table = row.closest("table");
+  const rows = Array.from(table?.querySelectorAll(":scope > tbody > tr") || []);
+  const rowIndex = rows.indexOf(row);
+  if (!table || rowIndex < 0) return null;
+
+  const pos = editor.view.posAtDOM(row, 0);
+  const $pos = editor.state.doc.resolve(pos);
+  let tableDepth = $pos.depth;
+  while (tableDepth > 0 && $pos.node(tableDepth).type.name !== "table") tableDepth -= 1;
+  if ($pos.node(tableDepth).type.name !== "table") return null;
+
+  return {
+    table,
+    rows,
+    rowIndex,
+    tablePos: $pos.before(tableDepth),
+    tableNode: $pos.node(tableDepth),
+  };
+}
+
+function tableHasHeaderRow(tableNode) {
+  const firstCell = tableNode.firstChild?.firstChild;
+  return firstCell?.type.name === "tableHeader";
+}
+
+function tableWidthsStorageId() {
+  if (currentFilePath) {
+    return `path:${currentFilePath.replace(/\\/g, "/").toLocaleLowerCase()}`;
+  }
+  if (currentFileHandle?.name) return `handle:${currentFileHandle.name}`;
+  return `draft:${documentName.value.trim() || "untitled"}`;
+}
+
+function readTableWidthsStore() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(TABLE_WIDTHS_KEY) || "{}");
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  } catch {
+    return {};
+  }
+}
+
+function collectTableColumnWidths() {
+  const tables = [];
+  editor.state.doc.descendants((node) => {
+    if (node.type.name !== "table") return true;
+    const widths = [];
+    node.firstChild?.forEach((cellNode) => {
+      const colspan = Number(cellNode.attrs.colspan || 1);
+      const colwidth = Array.isArray(cellNode.attrs.colwidth) ? cellNode.attrs.colwidth : [];
+      for (let index = 0; index < colspan; index += 1) {
+        const width = Number(colwidth[index]);
+        widths.push(Number.isFinite(width) && width >= 25 ? Math.round(width) : null);
+      }
+    });
+    tables.push(widths.some(Boolean) ? widths : null);
+    return false;
+  });
+  return tables;
+}
+
+function persistTableColumnWidths() {
+  const tables = collectTableColumnWidths();
+  const store = readTableWidthsStore();
+  const storageId = tableWidthsStorageId();
+  if (tables.some(Boolean)) store[storageId] = tables;
+  else delete store[storageId];
+  localStorage.setItem(TABLE_WIDTHS_KEY, JSON.stringify(store));
+}
+
+function restoreTableColumnWidths() {
+  const storedTables = readTableWidthsStore()[tableWidthsStorageId()];
+  if (!Array.isArray(storedTables) || !storedTables.length) return;
+
+  const transaction = editor.state.tr;
+  let tableIndex = 0;
+  editor.state.doc.descendants((tableNode, tablePos) => {
+    if (tableNode.type.name !== "table") return true;
+    const widths = storedTables[tableIndex];
+    tableIndex += 1;
+    if (!Array.isArray(widths)) return false;
+
+    const columnCount = tableNode.firstChild
+      ? Array.from({ length: tableNode.firstChild.childCount }, (_, index) => (
+        Number(tableNode.firstChild.child(index).attrs.colspan || 1)
+      )).reduce((sum, colspan) => sum + colspan, 0)
+      : 0;
+    if (widths.length !== columnCount || widths.some((width) => !Number.isFinite(width))) return false;
+
+    let rowPos = tablePos + 1;
+    tableNode.forEach((rowNode) => {
+      let cellPos = rowPos + 1;
+      let columnIndex = 0;
+      rowNode.forEach((cellNode) => {
+        const colspan = Number(cellNode.attrs.colspan || 1);
+        transaction.setNodeMarkup(cellPos, undefined, {
+          ...cellNode.attrs,
+          colwidth: widths.slice(columnIndex, columnIndex + colspan),
+        });
+        columnIndex += colspan;
+        cellPos += cellNode.nodeSize;
+      });
+      rowPos += rowNode.nodeSize;
+    });
+    return false;
+  });
+
+  if (transaction.docChanged) {
+    transaction.setMeta("addToHistory", false);
+    editor.view.dispatch(transaction);
+  }
+}
+
+function beginDirectColumnResize(event) {
+  if (event.button !== 0) return;
+  const targetElement = event.target instanceof Element ? event.target : event.target?.parentElement;
+  const cell = targetElement?.closest("td, th") || Array.from(
+    editor.view.dom.querySelectorAll("td, th"),
+  ).find((candidate) => {
+    const candidateRect = candidate.getBoundingClientRect();
+    const verticallyInside = event.clientY >= candidateRect.top && event.clientY <= candidateRect.bottom;
+    const nearVerticalEdge = Math.abs(event.clientX - candidateRect.left) <= TABLE_RESIZE_HANDLE_WIDTH
+      || Math.abs(event.clientX - candidateRect.right) <= TABLE_RESIZE_HANDLE_WIDTH;
+    return verticallyInside && nearVerticalEdge;
+  });
+  if (!cell || !editor.view.dom.contains(cell)) return;
+
+  const rect = cell.getBoundingClientRect();
+  let handleCell = null;
+  if (rect.right - event.clientX <= TABLE_RESIZE_HANDLE_WIDTH) {
+    handleCell = cell;
+  } else if (event.clientX - rect.left <= TABLE_RESIZE_HANDLE_WIDTH) {
+    handleCell = cell.previousElementSibling;
+  }
+  if (!handleCell?.matches("td, th")) return false;
+
+  freezeTableColumnWidths(cell);
+  const context = getTableColumnContext(handleCell);
+  if (!context) return false;
+  const columns = Array.from(context.table.querySelectorAll(":scope > colgroup > col"));
+  if (columns.length !== context.columnCount) return false;
+
+  const startX = event.clientX;
+  const startWidths = columns.map((column) => Math.max(25, Math.round(column.getBoundingClientRect().width)));
+  let resizedWidth = startWidths[context.columnIndex];
+  const tablePos = context.tablePos;
+  const columnIndex = context.columnIndex;
+
+  const previewWidth = (width) => {
+    resizedWidth = Math.max(25, Math.round(width));
+    columns[columnIndex].style.width = `${resizedWidth}px`;
+    context.table.style.width = `${startWidths.reduce((total, item, index) => (
+      total + (index === columnIndex ? resizedWidth : item)
+    ), 0)}px`;
+  };
+
+  const cleanup = () => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", finish);
+    window.removeEventListener("blur", finish);
+    document.body.classList.remove("table-column-resizing");
+  };
+
+  const finish = (finishEvent) => {
+    if (Number.isFinite(finishEvent?.clientX)) {
+      previewWidth(startWidths[columnIndex] + finishEvent.clientX - startX);
+    }
+    cleanup();
+
+    const tableNode = editor.state.doc.nodeAt(tablePos);
+    if (!tableNode || tableNode.type.name !== "table") return;
+    const transaction = editor.state.tr;
+    let rowPos = tablePos + 1;
+    tableNode.forEach((rowNode) => {
+      if (columnIndex >= rowNode.childCount) return;
+      let cellPos = rowPos + 1;
+      for (let index = 0; index < columnIndex; index += 1) cellPos += rowNode.child(index).nodeSize;
+      const cellNode = rowNode.child(columnIndex);
+      transaction.setNodeMarkup(cellPos, undefined, {
+        ...cellNode.attrs,
+        colwidth: [resizedWidth],
+      });
+      rowPos += rowNode.nodeSize;
+    });
+    if (transaction.docChanged) editor.view.dispatch(transaction);
+  };
+
+  const move = (moveEvent) => {
+    if (moveEvent.buttons === 0) {
+      finish(moveEvent);
+      return;
+    }
+    previewWidth(startWidths[columnIndex] + moveEvent.clientX - startX);
+    moveEvent.preventDefault();
+  };
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  document.body.classList.add("table-column-resizing");
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", finish);
+  window.addEventListener("blur", finish);
+  return true;
+}
+
+function sortTableByColumn(cell) {
+  const context = getTableColumnContext(cell);
+  if (!context || context.tableNode.childCount < 2) return false;
+
+  const rows = [];
+  context.tableNode.forEach((rowNode) => rows.push(rowNode));
+  const headerRows = tableHasHeaderRow(context.tableNode) ? rows.splice(0, 1) : [];
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  const sortedRows = rows
+    .map((rowNode, originalIndex) => ({
+      rowNode,
+      originalIndex,
+      value: rowNode.child(context.columnIndex).textContent.trim(),
+    }))
+    .sort((left, right) => {
+      const leftIsBlank = left.value.length === 0;
+      const rightIsBlank = right.value.length === 0;
+      if (leftIsBlank !== rightIsBlank) return leftIsBlank ? 1 : -1;
+      return collator.compare(left.value, right.value) || left.originalIndex - right.originalIndex;
+    })
+    .map(({ rowNode }) => rowNode);
+
+  const sortedTable = context.tableNode.type.create(
+    context.tableNode.attrs,
+    [...headerRows, ...sortedRows],
+    context.tableNode.marks,
+  );
+  editor.view.dispatch(
+    editor.state.tr
+      .replaceWith(context.tablePos, context.tablePos + context.tableNode.nodeSize, sortedTable)
+      .scrollIntoView(),
+  );
+  hoveredTableColumn = null;
+  tableColumnHandle?.classList.remove("visible");
+  return true;
+}
+
+function freezeTableColumnWidths(cell) {
+  const context = getTableContext(cell?.closest("tr"));
+  if (!context) return;
+
+  const columns = Array.from(context.table.querySelectorAll(":scope > colgroup > col"));
+  const widths = columns.map((column) => Math.max(25, Math.round(column.getBoundingClientRect().width)));
+  if (!widths.length) return;
+
+  const firstRow = context.tableNode.firstChild;
+  let alreadyFixed = Boolean(firstRow);
+  firstRow?.forEach((node) => {
+    if (!Array.isArray(node.attrs.colwidth)
+      || node.attrs.colwidth.length !== Number(node.attrs.colspan || 1)) {
+      alreadyFixed = false;
+    }
+  });
+  if (alreadyFixed) return;
+
+  const transaction = editor.state.tr;
+  let rowPos = context.tablePos + 1;
+  context.tableNode.forEach((rowNode) => {
+    let cellPos = rowPos + 1;
+    let columnIndex = 0;
+    rowNode.forEach((cellNode) => {
+      const colspan = Number(cellNode.attrs.colspan || 1);
+      transaction.setNodeMarkup(cellPos, undefined, {
+        ...cellNode.attrs,
+        colwidth: widths.slice(columnIndex, columnIndex + colspan),
+      });
+      columnIndex += colspan;
+      cellPos += cellNode.nodeSize;
+    });
+    rowPos += rowNode.nodeSize;
+  });
+  editor.view.dispatch(transaction);
+}
+
+function positionTableRowHandle(row) {
+  if (!tableRowHandle || !row?.isConnected) {
+    tableRowHandle?.classList.remove("visible");
+    return;
+  }
+  const context = getTableContext(row);
+  if (!context) {
+    tableRowHandle.classList.remove("visible");
+    return;
+  }
+
+  const rect = row.getBoundingClientRect();
+  const wrapperRect = context.table.closest(".tableWrapper")?.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) {
+    tableRowHandle.classList.remove("visible");
+    return;
+  }
+  tableRowHandle.classList.add("visible");
+  tableRowHandle.style.left = `${Math.max(4, (wrapperRect?.left ?? rect.left) - 24)}px`;
+  tableRowHandle.style.top = `${rect.top + Math.max(0, (rect.height - 24) / 2)}px`;
+}
+
+function getTableColumnContext(cell) {
+  const row = cell?.closest("tr");
+  const context = getTableContext(row);
+  if (!context) return null;
+
+  const columnIndex = Array.from(row.children).indexOf(cell);
+  const columnCount = context.tableNode.firstChild?.childCount || 0;
+  let supportsReordering = columnIndex >= 0 && columnCount > 0;
+  context.tableNode.forEach((rowNode) => {
+    if (rowNode.childCount !== columnCount) supportsReordering = false;
+    rowNode.forEach((cellNode) => {
+      if (Number(cellNode.attrs.colspan || 1) !== 1) supportsReordering = false;
+    });
+  });
+  if (!supportsReordering) return null;
+
+  return {
+    ...context,
+    cell,
+    columnIndex,
+    columnCount,
+  };
+}
+
+function positionTableColumnHandle(context) {
+  if (!tableColumnHandle || !context?.cell?.isConnected) {
+    tableColumnHandle?.classList.remove("visible");
+    return;
+  }
+  const firstRowCell = context.rows[0]?.children[context.columnIndex];
+  if (!firstRowCell) {
+    tableColumnHandle.classList.remove("visible");
+    return;
+  }
+  const cellRect = firstRowCell.getBoundingClientRect();
+  const wrapperRect = context.table.closest(".tableWrapper")?.getBoundingClientRect();
+  const tableRect = context.table.getBoundingClientRect();
+  if (cellRect.right < (wrapperRect?.left ?? 0)
+    || cellRect.left > (wrapperRect?.right ?? window.innerWidth)
+    || tableRect.bottom < 0
+    || tableRect.top > window.innerHeight) {
+    tableColumnHandle.classList.remove("visible");
+    return;
+  }
+  tableColumnHandle.classList.add("visible");
+  tableColumnHandle.style.left = `${cellRect.left + Math.max(0, (cellRect.width - 24) / 2)}px`;
+  tableColumnHandle.style.top = `${Math.max(4, tableRect.top - 24)}px`;
+}
+
+function clearTableRowDropTarget() {
+  tableRowDropTarget?.row.classList.remove("table-row-drop-before", "table-row-drop-after");
+  tableRowDropIndicator?.classList.remove("visible");
+  tableRowDropTarget = null;
+}
+
+function updateTableRowDropTarget(event) {
+  clearTableRowDropTarget();
+  if (!draggedTableRow) return;
+
+  const rows = Array.from(draggedTableRow.table.querySelectorAll(":scope > tbody > tr"));
+  if (!rows.length) return;
+  const row = rows.find((item) => {
+    const rect = item.getBoundingClientRect();
+    return event.clientY >= rect.top && event.clientY <= rect.bottom;
+  }) || (event.clientY < rows[0].getBoundingClientRect().top ? rows[0] : rows.at(-1));
+  const context = getTableContext(row);
+  if (!context || context.tablePos !== draggedTableRow.tablePos) return;
+
+  const rowRect = row.getBoundingClientRect();
+  const after = event.clientY > rowRect.top + rowRect.height / 2;
+  const boundary = context.rowIndex + (after ? 1 : 0);
+  row.classList.add(after ? "table-row-drop-after" : "table-row-drop-before");
+  const tableRect = context.table.getBoundingClientRect();
+  const wrapperRect = context.table.closest(".tableWrapper")?.getBoundingClientRect() || tableRect;
+  const left = Math.max(tableRect.left, wrapperRect.left);
+  const right = Math.min(tableRect.right, wrapperRect.right);
+  tableRowDropIndicator.style.left = `${left}px`;
+  tableRowDropIndicator.style.top = `${after ? rowRect.bottom - 1 : rowRect.top - 1}px`;
+  tableRowDropIndicator.style.width = `${Math.max(0, right - left)}px`;
+  tableRowDropIndicator.classList.add("visible");
+  tableRowDropTarget = { row, boundary };
+}
+
+function clearTableColumnDropTarget() {
+  tableColumnDropIndicator?.classList.remove("visible");
+  tableColumnDropTarget = null;
+}
+
+function updateTableColumnDropTarget(event) {
+  clearTableColumnDropTarget();
+  if (!draggedTableColumn) return;
+
+  const cells = Array.from(
+    draggedTableColumn.table.querySelectorAll(":scope > tbody > tr:first-child > th, :scope > tbody > tr:first-child > td"),
+  );
+  if (!cells.length) return;
+  const cell = cells.find((item) => {
+    const rect = item.getBoundingClientRect();
+    return event.clientX >= rect.left && event.clientX <= rect.right;
+  }) || (event.clientX < cells[0].getBoundingClientRect().left ? cells[0] : cells.at(-1));
+  const context = getTableColumnContext(cell);
+  if (!context || context.tablePos !== draggedTableColumn.tablePos) return;
+
+  const cellRect = cell.getBoundingClientRect();
+  const after = event.clientX > cellRect.left + cellRect.width / 2;
+  const boundary = context.columnIndex + (after ? 1 : 0);
+  const tableRect = context.table.getBoundingClientRect();
+  const wrapperRect = context.table.closest(".tableWrapper")?.getBoundingClientRect() || tableRect;
+  const editorRect = editorPane.getBoundingClientRect();
+  const top = Math.max(tableRect.top, editorRect.top);
+  const bottom = Math.min(tableRect.bottom, editorRect.bottom);
+  const edge = after ? cellRect.right - 1 : cellRect.left - 1;
+  tableColumnDropIndicator.style.left = `${Math.max(wrapperRect.left, Math.min(wrapperRect.right - 3, edge))}px`;
+  tableColumnDropIndicator.style.top = `${top}px`;
+  tableColumnDropIndicator.style.height = `${Math.max(0, bottom - top)}px`;
+  tableColumnDropIndicator.classList.add("visible");
+  tableColumnDropTarget = { boundary };
+}
+
+function finishTableRowDrag() {
+  if (!draggedTableRow) return;
+  const source = draggedTableRow;
+  const drop = tableRowDropTarget;
+  clearTableRowDropTarget();
+  tableRowHandle.classList.remove("dragging");
+  document.body.classList.remove("table-row-dragging");
+  draggedTableRow = null;
+
+  if (!drop) return;
+  const tableNode = editor.state.doc.nodeAt(source.tablePos);
+  if (!tableNode || tableNode.type.name !== "table") return;
+
+  const rows = [];
+  tableNode.forEach((rowNode) => rows.push(rowNode));
+  let insertIndex = drop.boundary;
+  if (source.rowIndex < insertIndex) insertIndex -= 1;
+  if (insertIndex === source.rowIndex) return;
+
+  const [movedRow] = rows.splice(source.rowIndex, 1);
+  rows.splice(Math.max(0, Math.min(rows.length, insertIndex)), 0, movedRow);
+  const normalizedRows = source.hasHeader
+    ? rows.map((rowNode, rowIndex) => {
+      const targetCellType = rowIndex === 0
+        ? editor.schema.nodes.tableHeader
+        : editor.schema.nodes.tableCell;
+      const cells = [];
+      rowNode.forEach((cellNode) => {
+        cells.push(cellNode.type === targetCellType
+          ? cellNode
+          : targetCellType.create(cellNode.attrs, cellNode.content, cellNode.marks));
+      });
+      return rowNode.type.create(rowNode.attrs, cells, rowNode.marks);
+    })
+    : rows;
+  const reorderedTable = tableNode.type.create(tableNode.attrs, normalizedRows, tableNode.marks);
+  editor.view.dispatch(
+    editor.state.tr
+      .replaceWith(source.tablePos, source.tablePos + tableNode.nodeSize, reorderedTable)
+      .scrollIntoView(),
+  );
+  hoveredTableRow = null;
+  tableRowHandle.classList.remove("visible");
+}
+
+function finishTableColumnDrag() {
+  if (!draggedTableColumn) return;
+  const source = draggedTableColumn;
+  const drop = tableColumnDropTarget;
+  clearTableColumnDropTarget();
+  tableColumnHandle.classList.remove("dragging");
+  document.body.classList.remove("table-column-dragging");
+  draggedTableColumn = null;
+
+  if (!drop) return;
+  const tableNode = editor.state.doc.nodeAt(source.tablePos);
+  if (!tableNode || tableNode.type.name !== "table") return;
+  let insertIndex = drop.boundary;
+  if (source.columnIndex < insertIndex) insertIndex -= 1;
+  if (insertIndex === source.columnIndex) return;
+
+  const reorderedRows = [];
+  tableNode.forEach((rowNode) => {
+    const cells = [];
+    rowNode.forEach((cellNode) => cells.push(cellNode));
+    const [movedCell] = cells.splice(source.columnIndex, 1);
+    cells.splice(Math.max(0, Math.min(cells.length, insertIndex)), 0, movedCell);
+    reorderedRows.push(rowNode.type.create(rowNode.attrs, cells, rowNode.marks));
+  });
+  const reorderedTable = tableNode.type.create(tableNode.attrs, reorderedRows, tableNode.marks);
+  editor.view.dispatch(
+    editor.state.tr
+      .replaceWith(source.tablePos, source.tablePos + tableNode.nodeSize, reorderedTable)
+      .scrollIntoView(),
+  );
+  hoveredTableColumn = null;
+  tableColumnHandle.classList.remove("visible");
+}
+
+function hideTableDragHandles() {
+  tableRowHandle?.classList.remove("visible");
+  tableColumnHandle?.classList.remove("visible");
+}
+
+function beginPendingTableDrag(kind, event) {
+  const context = kind === "row"
+    ? getTableContext(hoveredTableRow)
+    : hoveredTableColumn;
+  if (!context) return;
+  pendingTableDrag = {
+    kind,
+    context,
+    startX: event.clientX,
+    startY: event.clientY,
+  };
+}
+
+function updatePendingTableDrag(event) {
+  if (!pendingTableDrag) return;
+  const distance = Math.hypot(
+    event.clientX - pendingTableDrag.startX,
+    event.clientY - pendingTableDrag.startY,
+  );
+  if (distance < 5) return;
+
+  hideTableTools();
+  if (pendingTableDrag.kind === "row" && !draggedTableRow) {
+    const context = pendingTableDrag.context;
+    draggedTableRow = {
+      table: context.table,
+      tablePos: context.tablePos,
+      rowIndex: context.rowIndex,
+      hasHeader: tableHasHeaderRow(context.tableNode),
+    };
+    tableRowHandle.classList.add("dragging");
+    document.body.classList.add("table-row-dragging");
+  } else if (pendingTableDrag.kind === "column" && !draggedTableColumn) {
+    const context = pendingTableDrag.context;
+    draggedTableColumn = {
+      table: context.table,
+      tablePos: context.tablePos,
+      columnIndex: context.columnIndex,
+    };
+    tableColumnHandle.classList.add("dragging");
+    document.body.classList.add("table-column-dragging");
+  }
+
+  if (draggedTableRow) updateTableRowDropTarget(event);
+  if (draggedTableColumn) updateTableColumnDropTarget(event);
+}
+
+function finishPendingTableDrag() {
+  const pending = pendingTableDrag;
+  pendingTableDrag = null;
+  if (!pending) return;
+
+  if (draggedTableRow) {
+    finishTableRowDrag();
+    return;
+  }
+  if (draggedTableColumn) {
+    finishTableColumnDrag();
+    return;
+  }
+
+  if (pending.kind === "row") {
+    const cell = pending.context.rows[pending.context.rowIndex]?.children[0];
+    if (cell) showTableTools("row", cell, tableRowHandle);
+  } else {
+    const cell = pending.context.rows[0]?.children[pending.context.columnIndex];
+    if (cell) showTableTools("column", cell, tableColumnHandle);
+  }
+}
+
+function cancelPendingTableDrag() {
+  pendingTableDrag = null;
+  clearTableRowDropTarget();
+  clearTableColumnDropTarget();
+  draggedTableRow = null;
+  draggedTableColumn = null;
+  tableRowHandle?.classList.remove("dragging");
+  tableColumnHandle?.classList.remove("dragging");
+  document.body.classList.remove("table-row-dragging", "table-column-dragging");
+}
+
+function setupTableDragging() {
+  tableRowHandle = document.createElement("button");
+  tableRowHandle.className = "table-row-handle";
+  tableRowHandle.type = "button";
+  tableRowHandle.textContent = "⠿";
+  tableRowHandle.title = "单击管理行，拖动调整行顺序";
+  tableRowHandle.setAttribute("aria-label", "单击管理行，拖动调整行顺序");
+  document.body.append(tableRowHandle);
+  tableRowDropIndicator = document.createElement("div");
+  tableRowDropIndicator.className = "table-row-drop-indicator";
+  tableRowDropIndicator.setAttribute("aria-hidden", "true");
+  document.body.append(tableRowDropIndicator);
+  tableColumnHandle = document.createElement("button");
+  tableColumnHandle.className = "table-column-handle";
+  tableColumnHandle.type = "button";
+  tableColumnHandle.textContent = "⠿";
+  tableColumnHandle.title = "单击管理列，拖动调整列顺序";
+  tableColumnHandle.setAttribute("aria-label", "单击管理列，拖动调整列顺序");
+  document.body.append(tableColumnHandle);
+  tableColumnDropIndicator = document.createElement("div");
+  tableColumnDropIndicator.className = "table-column-drop-indicator";
+  tableColumnDropIndicator.setAttribute("aria-hidden", "true");
+  document.body.append(tableColumnDropIndicator);
+
+  editor.view.dom.addEventListener("mousemove", (event) => {
+    if (draggedTableRow || draggedTableColumn || pendingTableDrag) return;
+    const row = event.target.closest("tr");
+    const wrapperRect = row?.closest(".tableWrapper")?.getBoundingClientRect();
+    const nearLeftEdge = wrapperRect
+      && event.clientX >= wrapperRect.left - 2
+      && event.clientX <= wrapperRect.left + 18;
+    if (!row || !nearLeftEdge) {
+      hoveredTableRow = null;
+      tableRowHandle.classList.remove("visible");
+    } else {
+      hoveredTableRow = row;
+      positionTableRowHandle(row);
+    }
+
+    const cell = event.target.closest("td, th");
+    const columnContext = getTableColumnContext(cell);
+    const tableRect = columnContext?.table.getBoundingClientRect();
+    const nearTopEdge = tableRect
+      && event.clientY >= tableRect.top - 2
+      && event.clientY <= tableRect.top + 18;
+    if (!columnContext || !nearTopEdge) {
+      hoveredTableColumn = null;
+      tableColumnHandle.classList.remove("visible");
+    } else {
+      hoveredTableColumn = columnContext;
+      positionTableColumnHandle(columnContext);
+    }
+  });
+  editor.view.dom.addEventListener("mouseleave", (event) => {
+    if (draggedTableRow || draggedTableColumn
+      || event.relatedTarget === tableRowHandle
+      || event.relatedTarget === tableColumnHandle) return;
+    hideTableDragHandles();
+  });
+  tableRowHandle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const context = getTableContext(hoveredTableRow);
+    if (!context) return;
+    beginPendingTableDrag("row", event);
+  });
+  tableColumnHandle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    beginPendingTableDrag("column", event);
+  });
+  document.addEventListener("mousemove", updatePendingTableDrag);
+  document.addEventListener("mouseup", finishPendingTableDrag);
+  const repositionHandles = () => {
+    positionTableRowHandle(hoveredTableRow);
+    positionTableColumnHandle(hoveredTableColumn);
+  };
+  editorPane.addEventListener("scroll", repositionHandles);
+  editor.view.dom.addEventListener("scroll", repositionHandles, true);
+  window.addEventListener("resize", repositionHandles);
+  window.addEventListener("blur", cancelPendingTableDrag);
+}
+
 function setupTableTools() {
   tableTools = document.createElement("div");
   tableTools.className = "table-tools";
   tableTools.setAttribute("role", "toolbar");
   tableTools.setAttribute("aria-label", "表格行列操作");
-  tableTools.innerHTML = `
-    <button type="button" data-table-action="row-before" title="在当前行上方添加一行">+ 上方行</button>
-    <button type="button" data-table-action="row-after" title="在当前行下方添加一行">+ 下方行</button>
-    <span class="table-tools-divider" aria-hidden="true"></span>
-    <button type="button" data-table-action="column-before" title="在当前列左侧添加一列">+ 左侧列</button>
-    <button type="button" data-table-action="column-after" title="在当前列右侧添加一列">+ 右侧列</button>
-    <span class="table-tools-divider" aria-hidden="true"></span>
-    <button class="danger" type="button" data-table-action="delete-row" title="删除当前行">删除行</button>
-    <button class="danger" type="button" data-table-action="delete-column" title="删除当前列">删除列</button>
-  `;
   document.body.append(tableTools);
 
+  editor.view.dom.addEventListener("mousedown", (event) => {
+    if (beginDirectColumnResize(event)) return;
+    const cell = event.target.closest("td, th");
+    if (cell) freezeTableColumnWidths(cell);
+  }, true);
   tableTools.addEventListener("mousedown", (event) => event.preventDefault());
   tableTools.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-table-action]");
+    if (button?.dataset.tableAction === "sort-column") {
+      if (!button.disabled) sortTableByColumn(activeTableCell);
+      hideTableTools();
+      return;
+    }
     const command = TABLE_ACTIONS[button?.dataset.tableAction];
     if (!command || button.disabled) return;
     editor.chain().focus()[command]().run();
-    requestAnimationFrame(() => {
-      const selection = window.getSelection();
-      const node = selection?.anchorNode;
-      activeTableCell = (node?.nodeType === globalThis.Node.TEXT_NODE ? node.parentElement : node)?.closest?.("td, th")
-        || activeTableCell;
-      updateTableTools();
-    });
+    hideTableTools();
   });
-
-  editor.view.dom.addEventListener("mousedown", () => {
-    activeTableCell = null;
-    updateTableTools();
-  });
-  editor.view.dom.addEventListener("dblclick", (event) => {
-    const cell = event.target.closest("td, th");
-    activeTableCell = cell && editor.view.dom.contains(cell) ? cell : null;
-    requestAnimationFrame(updateTableTools);
-  });
+  editor.view.dom.addEventListener("mousedown", hideTableTools);
   document.addEventListener("mousedown", (event) => {
-    if (tableTools.contains(event.target) || editor.view.dom.contains(event.target)) return;
-    activeTableCell = null;
-    updateTableTools();
+    if (tableTools.contains(event.target)
+      || tableRowHandle?.contains(event.target)
+      || tableColumnHandle?.contains(event.target)) return;
+    hideTableTools();
   });
   editorPane.addEventListener("scroll", updateTableTools);
   editor.view.dom.addEventListener("scroll", updateTableTools, true);
   window.addEventListener("resize", updateTableTools);
 }
 
+function showTableTools(mode, cell, anchor) {
+  if (!cell?.isConnected || !anchor) return;
+  tableToolsMode = mode;
+  tableToolsAnchor = anchor;
+  activeTableCell = cell;
+  tableTools.innerHTML = mode === "row"
+    ? `
+      <button type="button" data-table-action="row-before" title="在当前行上方添加一行">+ 上方添加行</button>
+      <button type="button" data-table-action="row-after" title="在当前行下方添加一行">+ 下方添加行</button>
+      <button class="danger" type="button" data-table-action="delete-row" title="删除当前行">删除行</button>
+    `
+    : `
+      <button type="button" data-table-action="sort-column" title="按当前列的字典序重新排列所有数据行">按当前列排序</button>
+      <span class="table-tools-divider" aria-hidden="true"></span>
+      <button type="button" data-table-action="column-before" title="在当前列左侧添加一列">+ 左侧添加列</button>
+      <button type="button" data-table-action="column-after" title="在当前列右侧添加一列">+ 右侧添加列</button>
+      <button class="danger" type="button" data-table-action="delete-column" title="删除当前列">删除列</button>
+    `;
+
+  const pos = editor.view.posAtDOM(cell, 0);
+  editor.commands.setTextSelection(pos + 1);
+  updateTableTools();
+}
+
+function hideTableTools() {
+  tableToolsMode = null;
+  tableToolsAnchor = null;
+  activeTableCell = null;
+  tableTools?.classList.remove("visible");
+}
+
 function updateTableTools() {
   if (!tableTools) return;
   const hidden = editorSurface.classList.contains("source-mode")
+    || !tableToolsMode
+    || !tableToolsAnchor?.isConnected
     || !activeTableCell?.isConnected
     || !editor.isActive("table");
   tableTools.classList.toggle("visible", !hidden);
   if (hidden) return;
 
   for (const button of tableTools.querySelectorAll("button[data-table-action]")) {
+    if (button.dataset.tableAction === "sort-column") {
+      button.disabled = tableToolsMode !== "column" || !getTableColumnContext(activeTableCell);
+      continue;
+    }
     const command = TABLE_ACTIONS[button.dataset.tableAction];
     button.disabled = !editor.can()[command]();
   }
 
-  const cellRect = activeTableCell.getBoundingClientRect();
-  if (cellRect.bottom < 0 || cellRect.top > window.innerHeight) {
+  const anchorRect = tableToolsAnchor.getBoundingClientRect();
+  if (anchorRect.bottom < 0 || anchorRect.top > window.innerHeight) {
     tableTools.classList.remove("visible");
     return;
   }
   const toolsRect = tableTools.getBoundingClientRect();
-  const top = cellRect.top > toolsRect.height + 12
-    ? cellRect.top - toolsRect.height - 8
-    : cellRect.bottom + 8;
+  const top = anchorRect.top > toolsRect.height + 12
+    ? anchorRect.top - toolsRect.height - 8
+    : anchorRect.bottom + 8;
   const left = Math.min(
     window.innerWidth - toolsRect.width - 8,
-    Math.max(8, cellRect.left + (cellRect.width - toolsRect.width) / 2),
+    Math.max(8, anchorRect.left + (anchorRect.width - toolsRect.width) / 2),
   );
   tableTools.style.top = `${Math.max(8, top)}px`;
   tableTools.style.left = `${left}px`;
@@ -1684,7 +2396,12 @@ function setEditorMode(mode) {
     item.classList.toggle("active", item.dataset.mode === mode);
   });
   editorState.textContent = sourceMode ? "Markdown Source Mode" : "WYSIWYG Mode";
-  if (sourceMode) activeTableCell = null;
+  if (sourceMode) {
+    hoveredTableRow = null;
+    hoveredTableColumn = null;
+    hideTableDragHandles();
+    hideTableTools();
+  }
   updateTableTools();
 
   if (sourceMode) {
@@ -1726,6 +2443,7 @@ document.querySelector(".format-tools").addEventListener("click", (event) => {
 
 setupLinkClicks();
 setupTableTools();
+setupTableDragging();
 
 function setOutlineOpen(open) {
   workspace.classList.toggle("sidebar-collapsed", !open);
@@ -2132,6 +2850,7 @@ async function saveCurrentDocument(options = {}) {
       return false;
     }
   }
+  persistTableColumnWidths();
   try {
     if (runningInTauri()) {
       await invokeDesktop("write_text_file", { path: currentFilePath, content: markdown });
@@ -2180,6 +2899,7 @@ async function createNewFile() {
       documentName.title = path;
       documentName.value = fileDisplayName(path.split(/[\\/]/).at(-1));
       setMarkdown("");
+      persistTableColumnWidths();
       setActiveTreeFile();
       updateDocumentTitle();
       markDocumentSaved("已新建文件");
@@ -2209,6 +2929,7 @@ async function createNewFile() {
     documentName.title = handle.name;
     documentName.value = fileDisplayName(handle.name);
     setMarkdown("");
+    persistTableColumnWidths();
     setActiveTreeFile();
     updateDocumentTitle();
     markDocumentSaved("已新建文件");
